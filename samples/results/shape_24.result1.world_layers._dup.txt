@@ -1,5 +1,0 @@
-[SOLUTION METADATA]
-timestamp: 1756124392.3221898
-container_cid_sha256: 2ec3e8ded75b93dfffb0d01a11dc4a4d21fcd869c87a45f02a3d5a604d4ed304
-sid_state_sha256: fd68d131837b4e93849855503e79eaa84f3de960268ef07fa6cd31cfd6ab8a47
-sid_route_sha256: a565eb255d19279a66f0ddb1eff14a4b78ddd2b5bff14367494e8b22591f3db8
