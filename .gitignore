@@ -14,3 +14,15 @@ external/solver/results/
 # safety: prevent nested repos
 BallPuzzle2/
 ballpuzzle3/
+# puzzle_ui
+apps/puzzle_ui/viewer/libs/three/*
+.venv/
+.env
+
+# runtime
+external/solver/results/*
+external/solver/logs/*
+
+# python noise
+__pycache__/
+*.pyc

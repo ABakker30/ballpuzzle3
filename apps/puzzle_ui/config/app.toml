@@ -1,0 +1,12 @@
+﻿# Placeholder config for v0.1
+[paths]
+results_dir = "external/solver/results"
+logs_dir    = "external/solver/logs"
+
+[watch]
+poll_ms = 350
+debounce_ms = 120
+
+[solver]
+# example command is informational; UI will NOT change solver/engine
+# cmd = "python solver.py containers\\hollowpyramid.json --rng-seed 42000 --max-results 1"

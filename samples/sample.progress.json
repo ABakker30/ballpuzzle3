@@ -1,0 +1,11 @@
+﻿{
+  "event": "progress",
+  "run": 0,
+  "run_id": "sample_run",
+  "placed": 4,
+  "best_depth": 5,
+  "total": 25,
+  "attempts": 12345,
+  "attempts_per_sec": 987.6,
+  "elapsed_sec": 12.3
+}
