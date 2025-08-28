@@ -1,48 +1,42 @@
-# solver.py — tiny driver around your fast engine + "world" exporters (JSON + layers.txt)
-# Usage:
-#   python solver.py [path\to\container.json]
-# Defaults:
-#   container = .\containers\Roof.json
-#   pieces    = .\pieces\4sphere.orientations.py
-#
-# Stdout (minimal JSON):
-#   { placed, total, solution: [...], attempts_per_sec, log_tail }
-#
-# Files written:
-#   .\results\<ContainerName>.world.json
-#   .\results\<ContainerName>.world_layers.txt
-#   .\logs\progress.jsonl  (streaming snapshots every 5s, includes best_depth)
-#   .\logs\progress.json   (final snapshot at end, includes best_depth)
-#
-# World coords follow your example:
-#   u = j + k, v = i + k, w = i + j
-#   (x,y,z) = d * (u, v, w)  where  d = r * sqrt(2)
+# solver.py — FCC tetra-spheres puzzle driver
+# rev 3.9 — fresh-engine-per-run, snapshots (atomic + retry, non-blocking), deterministic shuffle,
+#           opener rotation, stall windows, hole4 pruning (optional / conditional),
+#           layered ASCII/JSON outputs, and console progress echo.
 
 from __future__ import annotations
-import json, os, sys, time, math, hashlib, importlib.util, importlib.machinery
+import argparse, json, os, time, hashlib, importlib.util, importlib.machinery
 from collections import deque
+from typing import Dict, List, Tuple, Set
 
 # ---------- paths ----------
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONTAINER = os.path.join(ROOT, "containers", "Roof.json")
 PIECES_PATH       = os.path.join(ROOT, "pieces", "4sphere.orientations.py")
-ENGINE_PATH       = os.path.join(ROOT, "solver_engine.py")  # your fast engine
+ENGINE_PATH       = os.path.join(ROOT, "solver_engine.py")
+
 RESULTS_DIR       = os.path.join(ROOT, "results")
 LOGS_DIR          = os.path.join(ROOT, "logs")
-PROGRESS_PATH     = os.path.join(LOGS_DIR, "progress.jsonl")
-PROGRESS_FINAL_PATH = os.path.join(LOGS_DIR, "progress.json")
+PROGRESS_PATH     = os.path.join(LOGS_DIR, "progress.json")
+PROGRESS_STREAM   = os.path.join(LOGS_DIR, "progress.jsonl")
 
-# ---------- io helpers ----------
+def ensure_dir(p: str):
+    if not os.path.isdir(p):
+        os.makedirs(p, exist_ok=True)
+
+# ---------- IO helpers ----------
 def load_json(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def sha1_file(path: str) -> str:
+def _file_sha1(path: str) -> str:
     h = hashlib.sha1()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+def sha1_file(path: str) -> str:
+    return _file_sha1(path)
 
 def load_py_module(path: str, name: str):
     loader = importlib.machinery.SourceFileLoader(name, path)
@@ -51,285 +45,754 @@ def load_py_module(path: str, name: str):
     loader.exec_module(mod)
     return mod
 
-def ensure_dir(p: str):
-    try: os.makedirs(p, exist_ok=True)
-    except Exception: pass
-
-# ---------- pieces adapter (accepts VARIANTS or a variants-like dict) ----------
+# ---------- pieces adapter ----------
 def _looks_like_variants_dict(obj) -> bool:
-    if not isinstance(obj, dict) or not obj: return False
-    c = 0
-    for k, v in obj.items():
-        if not isinstance(k, (str,int)): return False
-        if not isinstance(v, (list,tuple)) or not v: return False
-        for ori in list(v)[:2]:
-            if not isinstance(ori, (list,tuple)) or len(ori) != 4: return False
-            for cell in ori:
-                if not (isinstance(cell, (list,tuple)) and len(cell) == 3 and all(isinstance(x,int) for x in cell)):
-                    return False
-        c += 1
-        if c >= 3: break
+    if not isinstance(obj, dict) or not obj:
+        return False
+    for _, v in obj.items():
+        if not isinstance(v, (list, tuple)) or not v:
+            return False
+        ori = v[0]
+        if not (isinstance(ori, (list, tuple)) and len(ori) == 4 and
+                all(isinstance(x, (list, tuple)) and len(x) == 3 for x in ori)):
+            return False
     return True
 
-def extract_pieces(mod):
-    # Preferred name
-    if hasattr(mod, "VARIANTS") and _looks_like_variants_dict(mod.VARIANTS):
-        variants = dict(mod.VARIANTS)
-    else:
-        # Heuristic scan
-        found = None
-        for name, val in vars(mod).items():
-            if _looks_like_variants_dict(val):
-                found = val; break
-        if found is None:
-            raise RuntimeError("pieces: could not find a variants-like dict")
-        variants = dict(found)
-    # Normalize to engine format: dict[id] -> tuple( tuple(dx,dy,dz), ... ) per orientation
-    pieces = {}
-    for pid, oris in variants.items():
-        norm_oris = []
-        for ori in oris:
-            norm_oris.append(tuple((int(a),int(b),int(c)) for (a,b,c) in ori))
-        pieces[str(pid)] = tuple(norm_oris)
-    return pieces
+def extract_pieces(pieces_mod) -> Dict[str, List[List[Tuple[int,int,int]]]]:
+    """
+    Accepts either:
+      1) { 'A': [ [(i,j,k)x4], [(i,j,k)x4], ... ], 'B': [...], ... }
+      2) { 'A__0': [(i,j,k)x4], 'A__1': [...], 'B__0': [...], ... }  -> bucket by prefix
+    """
+    data = getattr(pieces_mod, "PIECES", None)
+    if data is None:
+        raise ValueError("pieces module must define PIECES")
+    out: Dict[str, List[List[Tuple[int,int,int]]]] = {}
+    if _looks_like_variants_dict(data):
+        for pid, variants in data.items():
+            out[pid] = [ [tuple(c) for c in v] for v in variants ]
+        return out
+    for key, cells in data.items():
+        pid = key.split("__", 1)[0] if "__" in key else key
+        out.setdefault(pid, []).append([tuple(c) for c in cells])
+    return out
 
-# ---------- minimal JSON (stdout) ----------
-def build_minimal_result(engine, tail):
-    placed = engine.placed_count()
-    total  = engine.total_pieces()
-    t = max(engine.elapsed_seconds(), 1e-9)
-    aps = engine.attempts / t
+# ---------- world presentation ----------
+def ijk_to_world(i:int, j:int, k:int, r:float) -> List[float]:
+    # square-frame presentation
+    s = r * 2.0**0.5
+    x = (j + k) * s
+    y = (i + k) * s
+    z = (i + j) * s
+    return [x, y, z]
 
-    idx2cell = engine.idx2cell
+# ---------- canonical CID+SID helpers (orientation + translation invariant) ----------
+def _rotations24():
+    """Generate the 24 proper cubic rotations as signed permutations with det=+1."""
+    from itertools import permutations, product
+    perms = list(permutations((0,1,2)))  # 6
+    signs = [(1,1,1), (1,-1,-1), (-1,1,-1), (-1,-1,1)]  # product = +1
+    rots = []
+    for p in perms:
+        for s in signs:
+            rots.append((p, s))
+    return rots  # each rot is (perm, signs)
+
+def _apply_rot(v: Tuple[int,int,int], rot) -> Tuple[int,int,int]:
+    (p, s) = rot
+    w = (v[p[0]], v[p[1]], v[p[2]])
+    return (s[0]*w[0], s[1]*w[1], s[2]*w[2])
+
+def _normalize_cells(cells: List[Tuple[int,int,int]]) -> List[Tuple[int,int,int]]:
+    mi = min(i for i,_,_ in cells)
+    mj = min(j for _,j,_ in cells)
+    mk = min(k for _,_,k in cells)
+    return sorted([(i-mi, j-mj, k-mk) for (i,j,k) in cells])
+
+def _canonicalize_cells(cells: List[Tuple[int,int,int]]):
+    """Return (canon_cells, chosen_rot, delta) where canon_cells are sorted, delta is (mi,mj,mk)."""
+    best_str = None
+    best = None
+    best_rot = None
+    best_delta = None
+    for rot in _rotations24():
+        rot_cells = [_apply_rot(c, rot) for c in cells]
+        # compute delta (mins) for this rotation
+        mi = min(i for i,_,_ in rot_cells)
+        mj = min(j for _,j,_ in rot_cells)
+        mk = min(k for _,_,k in rot_cells)
+        norm = sorted([(i-mi, j-mj, k-mk) for (i,j,k) in rot_cells])
+        s = ";".join(f"{i},{j},{k}" for (i,j,k) in norm)
+        if best_str is None or s < best_str:
+            best_str = s
+            best = norm
+            best_rot = rot
+            best_delta = (mi, mj, mk)
+    return best, best_rot, best_delta, best_str  # best_str is the canonical serialization
+
+def _sha256_hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def _cells_to_piece_string(cells: List[Tuple[int,int,int]]) -> str:
+    # i:j:k comma-separated 4-tuples
+    return ",".join(f"{i}:{j}:{k}" for (i,j,k) in cells)
+
+def _transform_cells(cells: List[Tuple[int,int,int]], rot, delta: Tuple[int,int,int]) -> List[Tuple[int,int,int]]:
+    """Apply chosen rotation and translation-normalization to given cells."""
+    mi, mj, mk = delta
     out = []
-    for pl in engine.placements:
-        out.append({
-            "piece": pl["piece"],
-            "variant": pl["ori_idx"],
-            "anchor": list(idx2cell[pl["origin_idx"]]),
-            "cells_ijk": [list(idx2cell[i]) for i in pl["cells_idx"]],
-        })
-    return {
-        "placed": placed,
-        "total": total,
-        "solution": out,
-        "attempts_per_sec": aps,
-        "log_tail": list(tail)[-100:]
-    }
+    for c in cells:
+        r = _apply_rot(c, rot)
+        out.append((r[0]-mi, r[1]-mj, r[2]-mk))
+    return sorted(out)
 
-# ---------- world coordinate helpers ----------
-def ijk_to_world(i:int, j:int, k:int, r:float):
-    # u=j+k, v=i+k, w=i+j; scale by d=r*sqrt(2)
-    d = r * math.sqrt(2.0)
-    u = j + k
-    v = i + k
-    w = i + j
-    return [u * d, v * d, w * d]
+# ---------- outputs ----------
+def write_world_layers(engine, path: str, meta: dict = None):
+    """
+    Write the human-readable world view TXT. If `meta` is provided, include a short
+    metadata header (timestamp, container_cid_sha256, sid_state_sha256, sid_route_sha256).
+    """
+    txt = write_world_layers_str(
+        engine,
+        container_cid_sha256=(meta.get("container_cid_sha256") if meta else None),
+        sid_state_sha256=(meta.get("sid_state_sha256") if meta else None),
+        sid_route_sha256=(meta.get("sid_route_sha256") if meta else None),
+        timestamp=(meta.get("timestamp") if meta else None),
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(txt)
 
-# ---------- world JSON (example-compatible) ----------
-def write_world_json(container_path: str, container_name: str, r: float, engine, dst_path: str):
+def write_world_json(engine, dst_path: str, container_path: str, container_name: str, r: float):
+    idx2cell = engine.idx2cell
     data = {
         "schema": "tetra_spheres_solution/1.0",
         "container_name": container_name,
         "container_path": container_path,
-        "container_hash": sha1_file(container_path),
         "present": "square",
         "presentation": {
             "mode": "square",
             "frame": { "R": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]], "t": [0.0,0.0,0.0] }
         },
         "r": r,
+        "pieces_order": [pl["piece"] for pl in engine.placements],
+        "pieces": [],
+        "depth": engine.placed_count(),
+        "timestamp": time.time()
     }
 
-    # pieces_order (order of final placements)
-    order = [pl["piece"] for pl in engine.placements]
-    data["pieces_order"] = order
+    # --- Compute canonical, orientation/translation-invariant CID over container cells ---
+    container_cells = [tuple(c) for c in idx2cell]
+    canon_cells, chosen_rot, delta, canon_str = _canonicalize_cells(container_cells)
+    container_cid_sha256 = _sha256_hex(canon_str)
+    data["container_cid_sha256"] = container_cid_sha256
 
-    # pieces array with cells_ijk + world_centers
-    idx2cell = engine.idx2cell
-    pieces = []
+    # Build pieces section (original presentation) and collect canonicalized per-piece cells for SIDs
+    piece_to_cells_canon: Dict[str, List[Tuple[int,int,int]]] = {}
     for pl in engine.placements:
         cells_idx = pl["cells_idx"]
         cells_ijk = [list(idx2cell[i]) for i in cells_idx]
-        world_centers = [ijk_to_world(i,j,k,r) for (i,j,k) in cells_ijk]
-        pieces.append({
+        world_centers = [ijk_to_world(i, j, k, r) for (i, j, k) in cells_ijk]
+        data["pieces"].append({
             "id": pl["piece"],
             "cells_ijk": cells_ijk,
             "world_centers": world_centers
         })
-    data["pieces"] = pieces
+        # canonicalize this piece's cells using the container's chosen rotation+delta
+        cells_raw = [tuple(idx2cell[i]) for i in cells_idx]
+        cells_canon = _transform_cells(cells_raw, chosen_rot, delta)
+        piece_to_cells_canon[pl["piece"]] = cells_canon
 
-    data["depth"] = engine.placed_count()
-    data["timestamp"] = time.time()
+    # --- SID.state (order-agnostic final arrangement) ---
+    # Serialize piece map with piece ids sorted; each piece's 4 cells sorted (already)
+    state_parts = []
+    for pid in sorted(piece_to_cells_canon.keys()):
+        state_parts.append(f"{pid}=" + _cells_to_piece_string(piece_to_cells_canon[pid]))
+    sid_state_preimage = f"{container_cid_sha256}|{'|'.join(state_parts)}"
+    sid_state_sha256 = _sha256_hex(sid_state_preimage)
+    data["sid_state_sha256"] = sid_state_sha256
+
+    # --- SID.route (order-aware; uses pieces_order exactly) ---
+    route_parts = []
+    for pid in data["pieces_order"]:
+        cells_canon = piece_to_cells_canon.get(pid, [])
+        route_parts.append(f"{pid}=" + _cells_to_piece_string(cells_canon))
+    sid_route_preimage = f"{container_cid_sha256}|{'->'.join(route_parts)}"
+    sid_route_sha256 = _sha256_hex(sid_route_preimage)
+    data["sid_route_sha256"] = sid_route_sha256
 
     with open(dst_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ---------- layers.txt writer (mirroring & spacing aligned to your reference) ----------
-def write_world_layers(container_cells, engine, r: float, dst_path: str):
-    # Build map: cell -> piece id letter
+# ---------- atomic snapshot helpers (Windows-safe) ----------
+def _atomic_replace(src, dst, retries=12, delay=0.1):
+    """
+    Windows-safe replace with retries. Returns True on success, False on final failure.
+    Retries PermissionError/OSError (file temporarily locked by another process).
+    """
+    for _ in range(retries):
+        try:
+            os.replace(src, dst)
+            return True
+        except (PermissionError, OSError):
+            time.sleep(delay)
+    return False
+
+def _atomic_write(path: str, data: str):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(data)
+    if not _atomic_replace(tmp, path):
+        try: os.remove(tmp)
+        except Exception: pass
+
+def _atomic_write_world_json(path: str, engine, container_path: str, container_name: str, r: float):
+    tmp = path + ".tmp"
+    write_world_json(engine, tmp, container_path, container_name, r)
+    if not _atomic_replace(tmp, path):
+        try: os.remove(tmp)
+        except Exception: pass
+
+def write_world_layers_str(engine, container_cid_sha256=None, sid_state_sha256=None, sid_route_sha256=None, timestamp=None):
     idx2cell = engine.idx2cell
-    occ = {}
+    cell_to_piece = {}
     for pl in engine.placements:
         pid = pl["piece"]
         for ci in pl["cells_idx"]:
-            occ[tuple(idx2cell[ci])] = pid
+            cell_to_piece[idx2cell[ci]] = pid
 
-    # Collect occupied ijk
-    used = list(occ.keys())
-    if not used:
-        with open(dst_path, "w", encoding="utf-8") as f:
-            f.write("[empty]\n")
-        return
+    all_uvws = []
+    for (i, j, k) in idx2cell:
+        u = j + k; v = i + k; w = i + j
+        all_uvws.append((u, v, w))
+    if not all_uvws:
+        # still include a minimal header if provided
+        header_lines = []
+        header_lines.append("[SOLUTION METADATA]")
+        if timestamp is not None:
+            header_lines.append(f"timestamp: {timestamp}")
+        if container_cid_sha256 is not None:
+            header_lines.append(f"container_cid_sha256: {container_cid_sha256}")
+        if sid_state_sha256 is not None:
+            header_lines.append(f"sid_state_sha256: {sid_state_sha256}")
+        if sid_route_sha256 is not None:
+            header_lines.append(f"sid_route_sha256: {sid_route_sha256}")
+        header = "\n".join(header_lines + [""]) if len(header_lines) > 1 else ""
+        return header + "[SOLUTION — world view (ALL layers)]\n(empty)\n"
 
-    # uvw helpers
-    def uvw(i, j, k):
-        return (j + k, i + k, i + j)
+    u_min = min(u for (u,_,_) in all_uvws); u_max = max(u for (u,_,_) in all_uvws)
+    v_min = min(v for (_,v,_) in all_uvws); v_max = max(v for (_,v,_) in all_uvws)
+    w_min = min(w for (_,_,w) in all_uvws); w_max = max(w for (_,_,w) in all_uvws)
 
-    us = []
-    vs = []
-    ws = []
-    for (i, j, k) in used:
-        u, v, w = uvw(i, j, k)
-        us.append(u); vs.append(v); ws.append(w)
-    umin, umax = min(us), max(us)
-    vmin, vmax = min(vs), max(vs)
-    wmin, wmax = min(ws), max(ws)
+    layer_to_grid = {}
+    for (i, j, k), pid in cell_to_piece.items():
+        u = j + k; v = i + k; w = i + j
+        layer_to_grid.setdefault(w, {})[(u, v)] = pid
 
     lines = []
+    # --- NEW: metadata header (only prints keys that are provided) ---
+    lines.append("[SOLUTION METADATA]")
+    if timestamp is not None:
+        lines.append(f"timestamp: {timestamp}")
+    if container_cid_sha256 is not None:
+        lines.append(f"container_cid_sha256: {container_cid_sha256}")
+    if sid_state_sha256 is not None:
+        lines.append(f"sid_state_sha256: {sid_state_sha256}")
+    if sid_route_sha256 is not None:
+        lines.append(f"sid_route_sha256: {sid_route_sha256}")
+    lines.append("")  # blank line between header and view
+
+    # --- Existing world view ---
     lines.append("[SOLUTION — world view (ALL layers)]")
-    lines.append(f"Legend: rows=v (i+k: {vmin}..{vmax}), cols=u (j+k: {umin}..{umax}), layers=w (i+j: {wmin}..{wmax})")
+    lines.append(f"Legend: rows=v (i+k: {v_min}..{v_max}), cols=u (j+k: {u_min}..{u_max}), layers=w (i+j: {w_min}..{w_max})")
     lines.append("")
-
-    for w in range(wmin, wmax + 1):
+    INDENT_PER_ROW = 2
+    for w in range(w_min, w_max + 1):
         lines.append(f"Layer w=i+j={w}:")
-        lines.append("")  # blank line after header
-
-        # Print rows top-down: v = vmax .. vmin
-        # Print columns right-to-left: u = umax .. umin (matches your reference mirroring)
-        for v in range(vmax, vmin - 1, -1):
-            row = []
-            for u in range(umax, umin - 1, -1):
-                # invert uvw -> ijk:
-                # u=j+k, v=i+k, w=i+j
-                i2 = (v + w - u)
-                j2 = (u + w - v)
-                k2 = (u + v - w)
-                if (i2 | j2 | k2) & 1:
-                    row.append("  ")
-                    continue
-                i = i2 // 2; j = j2 // 2; k = k2 // 2
-                pid = occ.get((i, j, k))
-                if pid is None:
-                    row.append("  ")
-                else:
-                    ch = str(pid)[0]  # one-letter IDs expected; if longer, first char
-                    row.append(ch + " ")
-            lines.append("".join(row).rstrip())
         lines.append("")
+        grid = layer_to_grid.get(w, {})
+        for v in range(v_min, v_max + 1):
+            indent = " " * (INDENT_PER_ROW * (v_max - v))
+            row = []
+            for u in range(u_min, u_max + 1):
+                ch = grid.get((u, v), " ")
+                row.append(ch)
+            lines.append((indent + " ".join(row)).rstrip())
+        lines.append("")
+    return "\n".join(lines)
 
-    with open(dst_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines).rstrip() + "\n")
+def write_snapshot_atomic(container_path, container_name, r, engine, results_dir):
+    json_path = os.path.join(results_dir, f"{container_name}.current.world.json")
+    _atomic_write_world_json(json_path, engine, container_path, container_name, r)
 
-# ---------- final progress writer (includes best_depth) ----------
-def write_final_progress(engine, status: str, best_depth: int):
-    # status: "solved" or "exhausted"
-    t = max(engine.elapsed_seconds(), 1e-9)
-    snap = {
-        "status": status,
-        "placed": engine.placed_count(),
-        "best_depth": int(best_depth),
-        "total": engine.total_pieces(),
-        "attempts": engine.attempts,
-        "attempts_per_sec": engine.attempts / t,
-        "elapsed_sec": t,
-    }
-    with open(PROGRESS_FINAL_PATH, "w", encoding="utf-8") as f:
-        json.dump(snap, f, separators=(",", ":"))
+    # Read hashes + timestamp from the JSON snapshot
+    meta = {}
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except Exception:
+        meta = {}
 
-# ---------- main ----------
-def main():
-    container_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CONTAINER
-    ensure_dir(RESULTS_DIR); ensure_dir(LOGS_DIR)
+    txt = write_world_layers_str(
+        engine,
+        container_cid_sha256=meta.get("container_cid_sha256"),
+        sid_state_sha256=meta.get("sid_state_sha256"),
+        sid_route_sha256=meta.get("sid_route_sha256"),
+        timestamp=meta.get("timestamp")
+    )
 
-    # Load inputs
-    cont = load_json(container_path)
-    r = float(cont.get("r", 0.5))
-    cells = cont["cells"]
-    valid_set = set(tuple(x) for x in cells)
+    txt_path = os.path.join(results_dir, f"{container_name}.current.world_layers.txt")
+    _atomic_write(txt_path, txt)
+def safe_snapshot(args, engine):
+    # Never let snapshotting interrupt the solve.
+    try:
+        write_snapshot_atomic(args.container_path, args.container_name, args.r, engine, RESULTS_DIR)
+    except Exception:
+        pass
 
-    pieces_mod = load_py_module(PIECES_PATH, "pieces_module")
-    pieces = extract_pieces(pieces_mod)
+# ---------- progress emitters ----------
+def make_emit_progress(tail_deque: deque):
+    ensure_dir(LOGS_DIR)
 
-    # Load your engine
-    eng_mod = load_py_module(ENGINE_PATH, "engine_module")
-    SolverEngine = eng_mod.SolverEngine
+    def emit_progress_to_streams(payload: dict, tail: deque):
+        # stream line
+        with open(PROGRESS_STREAM, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        # tail mem
+        tail.append(payload)
+        # overwrite summary
+        summary = payload.copy()
+        try:
+            aps_val = round(payload.get("attempts_per_sec", 0), 1)
+        except Exception:
+            aps_val = payload.get("attempts_per_sec", 0)
+        summary["attempts_per_sec"] = aps_val
+        with open(PROGRESS_PATH, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
 
-    # Init + run with 5s progress
-    engine = SolverEngine(pieces, valid_set)
+        # console echo (concise)
+        try:
+            if payload.get("event") == "progress":
+                placed = payload.get("placed", 0)
+                best   = payload.get("best_depth", placed)
+                total  = payload.get("total", 25)
+                aps    = payload.get("attempts_per_sec", 0)
+                run    = payload.get("run", 0)
+                seed   = payload.get("seed", "")
+                status = payload.get("status", "")
+                line = f"[run {run} seed={seed}] placed {placed}/{total} | best {best} | rate {aps}/s"
+                if status:
+                    line += f" | {status}"
+                print(line, flush=True)
+        except Exception:
+            pass
 
-    # ---- minimal addition: enable hole-%4 prune via CLI flag ----
-    if any(arg in sys.argv for arg in ("--hole4", "--hole-mod4")):
-        setattr(engine, "hole_mod4", True)
-    # -------------------------------------------------------------
+    def emit_progress(engine, run_idx, seed_label, aps=0.0, placed_only=False):
+        cur = engine.placed_count()
+        best = getattr(engine, "best_depth_ever", cur)
+        payload = {
+            "event": "progress",
+            "run": run_idx,
+            "seed": seed_label,
+            "placed": cur,
+            "best_depth": best,
+            "total": engine.total_pieces(),
+            "attempts": getattr(engine, "attempts", 0),
+            "attempts_per_sec": aps,
+        }
+        if placed_only:
+            payload = {"event":"progress","run":run_idx,"placed":cur,"best_depth":best}
+        emit_progress_to_streams(payload, tail_deque)
+    return emit_progress
 
-    progress = open(PROGRESS_PATH, "a", encoding="utf-8")
-    tail = deque(maxlen=256)
-    last = time.perf_counter()
-    tail.append("[start] engine driver")
+# ---------- engine builder (fresh per attempt) ----------
+def build_engine(SolverEngine,
+                 pieces,
+                 valid_set,
+                 rng_seed=None,
+                 shuffle="none",
+                 rotate_first=0,
+                 hole4=True):
+    """
+    Construct a fresh engine configured for this attempt:
+      - sets RNG_SEED (if supported)
+      - deterministic piece order via engine._shuffle_order(shuffle)
+      - optional rotation of the opening piece
+      - toggles hole_mod4 pruning
+    """
+    eng = SolverEngine(pieces, valid_set)
 
-    # Track the highest placement depth for the run
-    best_depth = 0
-    solved = False
+    # Seed
+    try:
+        if rng_seed is not None:
+            eng.RNG_SEED = int(rng_seed)
+    except Exception:
+        pass
+
+    # Shuffle mode
+    try:
+        eng.shuffle_mode = shuffle
+        eng._shuffle_order(shuffle)
+    except Exception:
+        pass
+
+    # Rotate opening piece
+    try:
+        if rotate_first and hasattr(eng, "order") and len(eng.order) > 0:
+            r = int(rotate_first) % len(eng.order)
+            if r:
+                o = list(eng.order)
+                eng.order = tuple(o[r:] + o[:r])
+    except Exception:
+        pass
+
+    # Hole-mod-4 pruning
+    try:
+        eng.hole_mod4 = bool(hole4)
+    except Exception:
+        pass
+
+    return eng
+
+# ---------- empties%4 gate helper ----------
+def _empties_mod4_ok_now(engine) -> bool:
+    """Return True if engine thinks current empty-region sizes are all %4==0.
+       If the method/field isn't available, return True (don't block)."""
+    try:
+        return bool(engine._empties_mod4_ok(engine.occ_bits))
+    except Exception:
+        return True
+
+# ---------- runner (single attempt) ----------
+def run_once_with_engine(engine,
+                         run_idx: int,
+                         seed_label,
+                         effective_stall_limit_fn,
+                         emit_progress,
+                         args):
+    """
+    Returns: (status, progressed_any)
+      status ∈ {"solved", "exhausted_root", "stalled_or_exhausted"}
+    """
+    from time import monotonic
+
+    LOG_PERIOD = 5.0
+    last_log_t = monotonic()
+    prev_t = last_log_t
+    prev_att = getattr(engine, "attempts", 0)
+
+    # Snapshot cadence
+    last_snap_t = monotonic()
+    SNAP_IVL = args.snapshot_interval
+
+    # hole4 conditional gate: start with hole4 OFF if requested
+    deferred_hole4 = False
+    try:
+        want_hole4 = bool(engine.hole_mod4)
+    except Exception:
+        want_hole4 = bool(args.hole4)
+
+    if args.hole4 and args.hole4_conditional:
+        try:
+            engine.hole_mod4 = False
+            deferred_hole4 = True
+        except Exception:
+            deferred_hole4 = False  # cannot gate
+
+    emit_progress(engine, run_idx, seed_label, aps=0.0)
+
+    # initial snapshot so external monitors see something immediately
+    if SNAP_IVL is not None or args.snapshot_on_depth:
+        safe_snapshot(args, engine)
+        last_snap_t = monotonic()
+
+    progressed_any = False
+    last_best = getattr(engine, "best_depth_ever", engine.placed_count())
+    last_improve_t = monotonic()
 
     while True:
-        progressed, solved = engine.step_once()
+        progressed_step, solved = engine.step_once()
+        if progressed_step:
+            progressed_any = True
 
-        # Update best_depth whenever we see a new high-water mark
-        placed_now = engine.placed_count()
-        if placed_now > best_depth:
-            best_depth = placed_now
+        now = monotonic()
+        attempts = getattr(engine, "attempts", 0)
+        dt = max(1e-6, now - prev_t)
+        aps = int((attempts - prev_att) / dt)
 
-        now = time.perf_counter()
-        if now - last >= 5.0:
-            rate = engine.attempts / max(engine.elapsed_seconds(), 1e-9)
-            snap = {
-                "placed": placed_now,
-                "best_depth": int(best_depth),
-                "total": engine.total_pieces(),
-                "attempts": engine.attempts,
-                "attempts_per_sec": rate,
-                "elapsed_sec": engine.elapsed_seconds()
-            }
-            line = json.dumps(snap, separators=(",", ":"))
-            print(f"[{snap['elapsed_sec']:7.2f}s] placed={snap['placed']}/{snap['total']} best={snap['best_depth']} attempts={snap['attempts']} rate={rate:,.0f}/s")
-            progress.write(line + "\n"); progress.flush()
-            tail.append(line)
-            last = now
+        # Enable hole4 once empties are safe (if gated)
+        if deferred_hole4:
+            if _empties_mod4_ok_now(engine):
+                try:
+                    engine.hole_mod4 = want_hole4
+                    deferred_hole4 = False
+                except Exception:
+                    deferred_hole4 = False
 
+        # periodic log + snapshot
+        if now - last_log_t >= LOG_PERIOD:
+            emit_progress(engine, run_idx, seed_label, aps=aps)
+            last_log_t = now
+            prev_t = now
+            prev_att = attempts
+            if SNAP_IVL is not None and (now - last_snap_t) >= SNAP_IVL:
+                safe_snapshot(args, engine)
+                last_snap_t = now
+
+        # on best-depth improvement
+        cur_best2 = getattr(engine, "best_depth_ever", engine.placed_count())
+        if cur_best2 > last_best:
+            last_best = cur_best2
+            last_improve_t = now
+            emit_progress(engine, run_idx, seed_label, aps=aps)
+            if args.snapshot_on_depth:
+                safe_snapshot(args, engine)
+
+        # stop conditions
         if solved:
-            tail.append("[done] solved")
-            write_final_progress(engine, "solved", best_depth)
-            break
+            return "solved", progressed_any
 
-        # Exhaust detection: no progress, at root, nothing placed
-        if (not progressed) and engine.cursor == 0 and not engine.placements:
-            tail.append("[done] exhausted")
-            write_final_progress(engine, "exhausted", best_depth)
-            break
+        # stall / exhaustion
+        stall_limit = effective_stall_limit_fn(cur_best2)
+        if stall_limit is not None and (now - last_improve_t) >= stall_limit:
+            if engine.placed_count() == 0:
+                return "exhausted_root", progressed_any
+            return "stalled_or_exhausted", progressed_any
 
-    progress.close()
+# ---------- CLI ----------
+def build_argparser():
+    p = argparse.ArgumentParser(
+        description=(
+            "FCC ball puzzle solver — place 4-sphere pieces into a container lattice.\n\n"
+            "Examples:\n"
+            "  python solver.py containers/firstbox.py.json\n"
+            "  python solver.py containers/firstbox.py.json --hole4\n"
+            "  python solver.py containers/firstbox.py.json --rng-seed 42\n"
+            "  python solver.py containers/firstbox.py.json --restart-on-stall 900\n"
+            "  python solver.py containers/firstbox.py.json --rng-seed 42 --max-results 3\n"
+            "  python solver.py containers/firstbox.py.json --rng-seed 42 --shuffle-pieces within-buckets\n"
+            "  python solver.py containers/firstbox.py.json --stall-below-23 300 --stall-at-23 900 --stall-at-24 1800\n"
+            "  python solver.py containers/firstbox.py.json --snapshot-interval 5 --snapshot-on-depth\n"
+        ),
+        formatter_class=argparse.RawTextHelpFormatter
+    )
 
-    # Write world artifacts (JSON + layers)
+    p.add_argument("container", nargs="?", default=DEFAULT_CONTAINER,
+        help="Path to container JSON (default: containers/Roof.json)")
+
+    p.add_argument("--rng-seed", type=int, default=None,
+        help="Set RNG seed (affects candidate/ori order & TT keys). Omit for default engine seed = 1337.")
+
+    p.add_argument("--restart-on-stall", type=int, default=None, metavar="SECONDS",
+        help="Fallback stall window if depth-specific options are not provided.")
+
+    p.add_argument("--max-results", type=int, default=1, metavar="N",
+        help="Write up to N distinct solutions (seed increments). Default: 1.")
+
+    p.add_argument("--shuffle-pieces", choices=["none","within-buckets","full"], default="none",
+        help="Shuffle piece order deterministically from RNG seed.")
+
+    p.add_argument("--stall-below-23", type=int, default=None, metavar="SECONDS",
+        help="Stall window when best depth < 23 (overrides --restart-on-stall).")
+
+    p.add_argument("--stall-at-23", type=int, default=None, metavar="SECONDS",
+        help="Stall window when best depth >= 23 (overrides --restart-on-stall).")
+
+    p.add_argument("--stall-at-24", type=int, default=None, metavar="SECONDS",
+        help="Stall window when best depth >= 24 (overrides --restart-on-stall).")
+
+    p.add_argument("--check-thickness", action="store_true",
+        help="Debug: print counts of cells that have all 6 axial neighbors vs all 6 diagonal neighbors.")
+
+    p.add_argument("--try-openers", type=int, default=6, metavar="N",
+        help="If a run exhausts at depth 0, rotate the opening piece up to N times before changing seed (default: 6).")
+
+    # Hole pruning (escape % as %% to avoid argparse formatting error)
+    p.add_argument("--hole4", "--hole-mod4", action="store_true", dest="hole4",
+        help="Enable hole-detect pruning. Reject states where an empty region size %% 4 != 0.")
+
+    p.add_argument("--hole4-conditional", action="store_true",
+        help="Only enable hole-detect once the current empties already satisfy size %% 4 == 0.")
+
+    # Snapshots
+    p.add_argument("--snapshot-interval", type=int, default=None, metavar="SECONDS",
+        help="Write rolling snapshots of current placements every N seconds to results/<Name>.current.world.json and .current.world_layers.txt")
+
+    p.add_argument("--snapshot-on-depth", action="store_true",
+        help="Also write a snapshot whenever best depth improves.")
+
+    return p
+
+# ---------- driver ----------
+def main():
+    ensure_dir(RESULTS_DIR)
+    ensure_dir(LOGS_DIR)
+
+    p = build_argparser()
+    args = p.parse_args()
+
+    # container
+    container_path = args.container
+    container = load_json(container_path)
+    cells = [tuple(c) for c in container["cells"]]
+    valid_set: Set[Tuple[int,int,int]] = set(cells)
+    r = float(container.get("r", 0.5))
     container_name = os.path.splitext(os.path.basename(container_path))[0]
-    world_json_path   = os.path.join(RESULTS_DIR, f"{container_name}.world.json")
-    world_layers_path = os.path.join(RESULTS_DIR, f"{container_name}.world_layers.txt")
 
-    write_world_json(container_path, container_name, r, engine, world_json_path)
-    write_world_layers(cells, engine, r, world_layers_path)
+    # stash for snapshot helper
+    args.container_path = container_path
+    args.container_name = container_name
+    args.r = r
 
-    # Print the minimal JSON to stdout (lean interface)
-    print(json.dumps(build_minimal_result(engine, tail), separators=(",", ":")))
+    if args.check_thickness:
+        # quick structural diagnostic
+        axial = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]
+        diag6 = [(1,-1,0),(-1,1,0),(1,0,-1),(-1,0,1),(0,1,-1),(0,-1,1)]
+        v = valid_set
+        axial_full = 0
+        diag_full  = 0
+        for (i,j,k) in v:
+            if all((i+di,j+dj,k+dk) in v for (di,dj,dk) in axial): axial_full += 1
+            if all((i+di,j+dj,k+dk) in v for (di,dj,dk) in diag6): diag_full  += 1
+        print(f"[thickness] cells with all 6 axial neighbors: {axial_full}")
+        print(f"[thickness] cells with all 6 diagonal (FCC) neighbors: {diag_full}")
+
+    # pieces + engine class
+    pieces_mod = load_py_module(PIECES_PATH, "pieces_module")
+    pieces = extract_pieces(pieces_mod)
+    eng_mod = load_py_module(ENGINE_PATH, "engine_module")
+    SolverEngine = getattr(eng_mod, "SolverEngine")
+
+    # progress emitter
+    tail = deque(maxlen=256)
+    emit_progress = make_emit_progress(tail)
+
+    # seeds / loop
+    base_seed = args.rng_seed
+    run_idx = 0
+    max_results = max(1, int(args.max_results))
+    results_found = 0
+    seen_sigs = set()
+    best_depth_ever = 0
+
+    # output paths
+    def base_paths():
+        world_json_path   = os.path.join(RESULTS_DIR, f"{container_name}.world.json")
+        world_layers_path = os.path.join(RESULTS_DIR, f"{container_name}.world_layers.txt")
+        return world_json_path, world_layers_path
+
+    def indexed_paths(k: int):
+        world_json_path   = os.path.join(RESULTS_DIR, f"{container_name}.result{k}.world.json")
+        world_layers_path = os.path.join(RESULTS_DIR, f"{container_name}.result{k}.world_layers.txt")
+        return world_json_path, world_layers_path
+
+    # stall logic
+    def effective_stall_limit(best_depth: int):
+        if args.stall_at_24 is not None and best_depth >= 24:
+            return args.stall_at_24
+        if args.stall_at_23 is not None and best_depth >= 23:
+            return args.stall_at_23
+        if args.stall_below_23 is not None and best_depth < 23:
+            return args.stall_below_23
+        return args.restart_on_stall
+
+    # solution signature to dedup identical solutions
+    def solution_signature(engine) -> Tuple:
+        bag = []
+        for pl in engine.placements:
+            bag.append((pl["piece"], tuple(sorted(pl["cells_idx"]))))
+        bag.sort()
+        return tuple(bag)
+
+    # main multi-run loop
+    while results_found < max_results:
+        run_seed = (base_seed + run_idx) if base_seed is not None else None
+        seed_label = ("default" if run_seed is None else run_seed)
+
+        tried = 0
+        max_try_openers = max(0, int(args.try_openers))
+        rotated_solved = False
+
+        while tried <= max_try_openers:
+            # fresh engine for this attempt
+            engine = build_engine(
+                SolverEngine,
+                pieces,
+                valid_set,
+                rng_seed=run_seed,
+                shuffle=args.shuffle_pieces,
+                rotate_first=tried,
+                hole4=args.hole4
+            )
+
+            status, progressed_any = run_once_with_engine(
+                engine, run_idx, seed_label, effective_stall_limit, emit_progress, args
+            )
+
+            best_depth = getattr(engine, "best_depth_ever", engine.placed_count())
+            if best_depth > best_depth_ever:
+                best_depth_ever = best_depth
+
+            if status == "solved" and engine.placed_count() == engine.total_pieces():
+                sig = solution_signature(engine)
+                if sig not in seen_sigs:
+                    seen_sigs.add(sig)
+                    if max_results == 1:
+                        wjson, wlayers = base_paths()
+                    else:
+                        wjson, wlayers = indexed_paths(results_found + 1)
+                    write_world_json(engine, wjson, container_path, container_name, r)
+
+                    # Load hashes + timestamp from the just-written JSON so the TXT header matches
+                    _meta = {}
+                    try:
+                        with open(wjson, "r", encoding="utf-8") as _f:
+                            _meta = json.load(_f)
+                    except Exception:
+                        _meta = {}
+
+                    write_world_layers(engine, wlayers, meta=_meta)
+                    results_found += 1
+                rotated_solved = True
+                break
+
+            if status == "exhausted_root":
+                tried += 1
+                if tried <= max_try_openers:
+                    continue
+                else:
+                    break
+            else:
+                # stalled mid-depth or exhausted after some depth
+                break
+
+        # write a final progress event for this run
+        def _write_final(status_label):
+            payload = {
+                "event":"progress",
+                "run": run_idx,
+                "seed": seed_label,
+                "status": status_label,
+                "placed": engine.placed_count(),
+                "best_depth": getattr(engine, "best_depth_ever", engine.placed_count()),
+                "total": engine.total_pieces(),
+                "attempts": getattr(engine, "attempts", 0),
+                "attempts_per_sec": 0,
+            }
+            with open(PROGRESS_STREAM, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            with open(PROGRESS_PATH, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        if rotated_solved:
+            _write_final("solved")
+        else:
+            _write_final("stalled")
+
+        run_idx += 1
+        if results_found >= max_results:
+            break
+
+    return
 
 if __name__ == "__main__":
     main()

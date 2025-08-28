@@ -2,3 +2,15 @@
 # ignore accidental nested repos
 BallPuzzle2/
 ballpuzzle3/
+# runtime outputs
+logs/
+results/
+external/solver/logs/
+external/solver/results/
+
+# housekeeping
+*.bak
+
+# safety: prevent nested repos
+BallPuzzle2/
+ballpuzzle3/
