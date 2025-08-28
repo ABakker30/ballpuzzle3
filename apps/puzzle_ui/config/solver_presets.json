@@ -1,0 +1,64 @@
+﻿{
+  "version": "1",
+  "presets": [
+    {
+      "name": "Quick Test",
+      "values": {
+        "max_results": 1,
+        "shuffle_pieces": "within-buckets",
+        "stall_below_23": 5,
+        "stall_at_23": 40,
+        "stall_at_24": 120,
+        "restart_on_stall": 900,
+        "snapshot_interval": 5,
+        "snapshot_on_depth": true,
+        "hole_enabled": false
+      }
+    },
+    {
+      "name": "Balanced",
+      "values": {
+        "max_results": 3,
+        "shuffle_pieces": "full",
+        "stall_below_23": 120,
+        "stall_at_23": 900,
+        "stall_at_24": 1800,
+        "restart_on_stall": 1800,
+        "snapshot_interval": 10,
+        "snapshot_on_depth": true,
+        "hole_enabled": true,
+        "hole_size": 4
+      }
+    },
+    {
+      "name": "Deep",
+      "values": {
+        "max_results": 10,
+        "shuffle_pieces": "full",
+        "stall_below_23": 300,
+        "stall_at_23": 1200,
+        "stall_at_24": 3600,
+        "restart_on_stall": 3600,
+        "snapshot_interval": 30,
+        "snapshot_on_depth": true,
+        "hole_enabled": true,
+        "hole_size": 4
+      }
+    },
+    {
+      "name": "Overnight",
+      "values": {
+        "max_results": 100,
+        "shuffle_pieces": "full",
+        "stall_below_23": 600,
+        "stall_at_23": 2400,
+        "stall_at_24": 7200,
+        "restart_on_stall": 7200,
+        "snapshot_interval": 60,
+        "snapshot_on_depth": true,
+        "hole_enabled": true,
+        "hole_size": 4
+      }
+    }
+  ]
+}

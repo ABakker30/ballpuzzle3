@@ -15,7 +15,7 @@ external/solver/results/
 BallPuzzle2/
 ballpuzzle3/
 # puzzle_ui
-apps/puzzle_ui/viewer/libs/three/*
+
 .venv/
 .env
 

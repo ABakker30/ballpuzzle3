@@ -1,0 +1,65 @@
+﻿{
+  "version": "1",
+  "groups": [
+    {
+      "title": "Container",
+      "fields": [
+        {
+          "key": "container",
+          "label": "Container JSON",
+          "type": "file",
+          "arg": { "position": 0 },
+          "required": true,
+          "dialog": { "filter": "JSON (*.json)", "start_dir": "data/containers" }
+        }
+      ]
+    },
+    {
+      "title": "Basics",
+      "fields": [
+        { "key": "rng_seed", "label": "RNG seed", "type": "int", "default": 42000, "arg": { "flag": "--rng-seed" }, "min": 0 },
+        { "key": "max_results", "label": "Max results", "type": "int", "default": 1, "arg": { "flag": "--max-results" }, "min": 1 },
+        { "key": "shuffle_pieces", "label": "Shuffle pieces", "type": "enum", "default": "within-buckets", "choices": ["none", "within-buckets", "full"], "arg": { "flag": "--shuffle-pieces" } }
+      ]
+    },
+    {
+      "title": "Stalls & Restart",
+      "fields": [
+        { "key": "stall_below_23", "label": "Stall below 23 (s)", "type": "int", "default": 5, "arg": { "flag": "--stall-below-23" }, "min": 0 },
+        { "key": "stall_at_23", "label": "Stall at 23 (s)", "type": "int", "default": 40, "arg": { "flag": "--stall-at-23" }, "min": 0 },
+        { "key": "stall_at_24", "label": "Stall at 24 (s)", "type": "int", "default": 120, "arg": { "flag": "--stall-at-24" }, "min": 0 },
+        { "key": "restart_on_stall", "label": "Restart on stall (s)", "type": "int", "default": 900, "arg": { "flag": "--restart-on-stall" }, "min": 0 }
+      ]
+    },
+    {
+      "title": "Hole detection",
+      "hint": "If your solver supports hole flags like --hole4.",
+      "fields": [
+        { "key": "hole_enabled", "label": "Enable hole flag", "type": "bool", "default": false },
+        { "key": "hole_size", "label": "Hole size", "type": "int", "default": 4, "min": 1, "visible_if": { "hole_enabled": true }, "arg": { "pattern": "--hole{value}" } }
+      ]
+    },
+    {
+      "title": "Snapshots & Logging",
+      "fields": [
+        { "key": "snapshot_interval", "label": "Snapshot interval (s)", "type": "int", "default": 5, "min": 0, "arg": { "flag": "--snapshot-interval" } },
+        { "key": "snapshot_on_depth", "label": "Snapshot on depth", "type": "bool", "default": true, "arg": { "flag": "--snapshot-on-depth" } }
+      ]
+    },
+    {
+      "title": "Paths (advanced)",
+      "fields": [
+        { "key": "python_path", "label": "Python executable", "type": "file", "default": ".\\.venv\\Scripts\\python.exe", "arg": null },
+        { "key": "solver_script", "label": "Solver script", "type": "file", "default": ".\\run_solver.py", "arg": null },
+        { "key": "results_dir", "label": "Results dir", "type": "dir", "default": "external/solver/results", "arg": null },
+        { "key": "logs_dir", "label": "Logs dir", "type": "dir", "default": "external/solver/logs", "arg": null }
+      ]
+    },
+    {
+      "title": "Extra",
+      "fields": [
+        { "key": "extra_args", "label": "Extra CLI args", "type": "string", "multiline": true, "placeholder": "--flag value --another-flag", "arg": { "raw": true } }
+      ]
+    }
+  ]
+}
