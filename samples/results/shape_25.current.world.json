@@ -1,0 +1,39 @@
+{
+  "schema": "tetra_spheres_solution/1.0",
+  "container_name": "shape_25",
+  "container_path": "containers\\shape_25.json",
+  "container_hash": "127f46b7203f4c7142b6af1f09e6e4123035c5b4",
+  "present": "square",
+  "presentation": {
+    "mode": "square",
+    "frame": {
+      "R": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "t": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "r": 0.5,
+  "pieces_order": [],
+  "pieces": [],
+  "depth": 0,
+  "timestamp": 1756135155.2854474
+}

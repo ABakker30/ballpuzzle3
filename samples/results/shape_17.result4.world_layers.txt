@@ -1,0 +1,100 @@
+[SOLUTION — world view (ALL layers)]
+Legend: rows=v (i+k: 1..4), cols=u (j+k: 1..11), layers=w (i+j: 2..15)
+
+Layer w=i+j=2:
+
+      F
+
+
+
+
+Layer w=i+j=3:
+
+        F
+    F
+
+
+
+Layer w=i+j=4:
+
+      P   C
+      F
+  P
+
+
+Layer w=i+j=5:
+
+        T   C
+    P   R
+    P
+Q
+
+Layer w=i+j=6:
+
+      T   R   R
+      Q   C
+  Q   Q
+  Y
+
+Layer w=i+j=7:
+
+        S   R   L
+    T   W   C
+    W   Y
+    Y
+
+Layer w=i+j=8:
+
+      T   N   L   L
+      S   W   L
+      N   A
+      Y
+
+Layer w=i+j=9:
+
+        S   W   O   D
+        N   O   G
+        A   A
+        E
+
+Layer w=i+j=10:
+
+          S   O   V   H
+          N   V   D
+          A   G
+          E
+
+Layer w=i+j=11:
+
+            I   I   V   H
+            O   U   V
+            E   D
+            G
+
+Layer w=i+j=12:
+
+              I   U   H   X
+              E   B   M
+              G   M
+              D
+
+Layer w=i+j=13:
+
+                I   U   H
+                J   B   X
+                M   B
+                M
+
+Layer w=i+j=14:
+
+                  J   B
+                  U   X
+                  X   K
+                  K
+
+Layer w=i+j=15:
+
+                    J
+                    J
+                    K
+                    K

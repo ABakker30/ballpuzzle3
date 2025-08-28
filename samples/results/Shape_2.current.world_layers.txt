@@ -1,0 +1,60 @@
+[SOLUTION METADATA]
+timestamp: 1756318419.1550126
+container_cid_sha256: b6eab98e207431f6ffb4636507e10eaaa835a70288e852bbf88942dc45b5cda7
+sid_state_sha256: 920a313e95a87586156c797ba6b7a2efe5cf226e86deddf06b37d6c3e0515287
+sid_route_sha256: 4b07da69c442b44a7cde760eb97d4e26953e3cd89106f6d4e3ec83d77d04f451
+
+[SOLUTION — world view (ALL layers)]
+Legend: rows=v (i+k: 0..9), cols=u (j+k: 0..4), layers=w (i+j: 0..3)
+
+Layer w=i+j=0:
+
+                  H
+
+
+
+              Y
+          Y   D
+      Y   F
+      F   A
+  C   A   A
+  E   A
+
+Layer w=i+j=1:
+
+
+                H
+
+
+
+        Y
+        F   D
+    F   B   E
+    C   E
+I   E   G
+
+Layer w=i+j=2:
+
+                  H
+
+
+
+
+
+      B       G
+      B   D
+  I   J   G
+  C   J
+
+Layer w=i+j=3:
+
+
+                H
+
+
+
+
+
+    I   J   G
+    B   D
+I   C   J

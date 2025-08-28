@@ -1,0 +1,43 @@
+[TRIANGULAR LAYERS — base j=-5 shown first]
+Container: Shape_15
+Legend: rows=B (desc), cols=A (asc). Rows are parity-staggered;
+        columns are globally aligned within each layer.
+Glyph = first letter of piece id.
+
+Layer L=0:
+
+               R
+            R P
+           K P P
+        K K C N
+       W O V C U
+    F O V C G B
+   F F O T C H H
+J F J T D D D D
+
+Layer L=1:
+
+             P
+          R R
+         K W S
+      W W V N
+     M O T N U
+  Y Y Y T G B
+ J J Q Q H H B
+
+Layer L=2:
+
+           X
+        S S
+       M V N
+    M M U U
+   Y Q A I B
+E Q A L G G
+
+Layer L=3:
+
+         X
+      S X
+     E X I
+  E A L I
+ E A L L I
