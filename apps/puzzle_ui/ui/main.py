@@ -1,6 +1,14 @@
 ﻿# --- local package bootstrap (run directly OR as module) ---
-import sys, re
+import sys
+import re
 from pathlib import Path
+
+# Precompiled regex for solver stdout lines like:
+# [run 0 seed=42000] placed 22/25 | best 24 | rate 7301/s
+STDOUT_PROGRESS_RE = re.compile(
+    r"\[run\s+(?P<run>\d+)[^\]]*\]\s*placed\s+(?P<placed>\d+)\/(?P<total>\d+)\s*\|\s*best\s+(?P<best>\d+)\s*\|\s*rate\s+(?P<rate>[0-9.]+)\/s",
+    re.IGNORECASE,
+)
 
 _UI_DIR = Path(__file__).resolve().parent
 # If running as a script (no package), add the ui folder to sys.path
@@ -180,17 +188,10 @@ class MainWindow(QMainWindow):
             self._parse_and_apply_stdout(text)
 
     def _parse_and_apply_stdout(self, text: str):
-        """
-        Parse lines like:
-        [run 0 seed=42000] placed 22/25 | best 24 | rate 7301/s
-        """
-        pat = re.compile(
-            r"\[run\s+(?P<run>\d+)[^\]]*\]\s*placed\s+(?P<placed>\d+)\/(?P<total>\d+)\s*\|\s*best\s+(?P<best>\d+)\s*\|\s*rate\s+(?P<rate>[0-9.]+)\/s",
-            re.IGNORECASE,
-        )
-        for ln in text.splitlines()[::-1]:
-            m = pat.search(ln)
-            if not m: continue
+        for ln in text.splitlines()[::-1]:  # search most recent first
+            m = STDOUT_PROGRESS_RE.search(ln)
+            if not m:
+                continue
             self.solve_tab.lblRun.setText(m.group("run"))
             self.solve_tab.lblPlaced.setText(f"{m.group('placed')} / {m.group('total')}")
             self.solve_tab.lblBest.setText(m.group("best"))

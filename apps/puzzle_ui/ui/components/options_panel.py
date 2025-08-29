@@ -1,5 +1,21 @@
-import json, shlex, sys
+# apps/puzzle_ui/ui/components/options_panel.py
+
+# import shim: support both direct-run and module-run
+import sys
 from pathlib import Path
+
+_pkg = __package__
+if _pkg in (None, "", "components"):
+    # Direct run or imported as top-level "components"
+    _UI_DIR = Path(__file__).resolve().parents[1]  # .../apps/puzzle_ui/ui
+    if str(_UI_DIR) not in sys.path:
+        sys.path.insert(0, str(_UI_DIR))
+    from utils import app_root, repo_root, win_quote, as_str  # noqa: E402
+else:
+    # Module run: python -m apps.puzzle_ui.ui.main
+    from ..utils import app_root, repo_root, win_quote, as_str  # type: ignore
+
+import json, shlex
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt
@@ -9,14 +25,16 @@ from PySide6.QtWidgets import (
     QLineEdit, QTextEdit, QGroupBox, QScrollArea, QFileDialog
 )
 
-from ..utils import app_root, repo_root, win_quote, as_str
-
 
 class OptionsPanel(QWidget):
     """
     Builds a form from apps/puzzle_ui/config/solver_options.schema.json
-    Supports: file, dir, enum, bool, int, string (multiline)
-    Arg mappings: position, flag, pattern, raw
+    Supports field types: file, dir, enum, bool, int, string (multiline)
+    Arg mappings in schema:
+      - {"position": 0}          → positional arg slot
+      - {"flag": "--rng-seed"}   → flag + value (bool emits flag if True)
+      - {"pattern": "--hole{value}"}
+      - {"raw": true}            → split string into args with shlex
     """
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -32,10 +50,11 @@ class OptionsPanel(QWidget):
         self.load_schema()
         self.load_presets()
         self.populate_from_schema()
-        self.update_visibility()
+        self.update_visibility()  # ensure conditional fields are correct
 
     # ---------- Public API ----------
     def values(self) -> Dict[str, Any]:
+        """Collect current values from widgets (supports file/dir wrappers)."""
         out: Dict[str, Any] = {}
         for f in self.fields:
             key = f.get("key")
@@ -48,9 +67,11 @@ class OptionsPanel(QWidget):
         return out
 
     def apply_preset(self, name: str):
+        """Apply values from presets by name."""
         for p in self.presets:
             if p.get("name") == name:
-                self._set_values(p.get("values", {}))
+                vals = p.get("values", {})
+                self._set_values(vals)
                 break
         self.update_visibility()
         self.values_changed()
@@ -58,43 +79,50 @@ class OptionsPanel(QWidget):
     def build_command(self) -> Tuple[str, List[str], str]:
         """
         Returns (program, argv, pretty_string).
-        - program: python executable (defaults to current interpreter)
+        - program: python executable path/name (defaults to current interpreter)
         - argv: [solver_script, <positional>, <flags/values> ...]
-        - pretty: single string with resolved paths for display/copy
+        - pretty: a single string for UI preview (resolved where sensible)
         """
         v = self.values()
+
+        # default to the Python running this app (your venv)
         program = v.get("python_path") or sys.executable
 
+        # default solver path → external/solver/solver.py
         solver_script = v.get("solver_script") or (repo_root() / "external" / "solver" / "solver.py")
         sp = Path(solver_script)
         if not sp.is_absolute():
             sp = (repo_root() / sp).resolve()
 
+        # compile args
         positional: List[Tuple[int, str]] = []
         flagged: List[str] = []
         raw: List[str] = []
 
         for f in self.fields:
-            key = f.get("key"); arg = f.get("arg")
+            key = f.get("key")
+            arg = f.get("arg")
             if not key or arg is None:
                 continue
 
-            # visibility
-            vis = True
+            # visibility (respect visible_if)
             cond = f.get("visible_if")
+            visible = True
             if cond:
-                for depk, depv in cond.items():
-                    vis = (v.get(depk) == depv)
-            if not vis:
+                for dep_key, dep_val in cond.items():
+                    visible = (v.get(dep_key) == dep_val)
+            if not visible:
                 continue
 
             val = v.get(key, None)
+            # Skip empty strings for text/file/dir fields
             if f.get("type") in ("string", "file", "dir") and (val is None or val == ""):
                 continue
 
             if "position" in (arg or {}):
                 try:
-                    positional.append((int(arg["position"]), as_str(val)))
+                    pos = int(arg["position"])
+                    positional.append((pos, as_str(val)))
                 except Exception:
                     pass
             elif "flag" in (arg or {}):
@@ -105,7 +133,8 @@ class OptionsPanel(QWidget):
                 else:
                     flagged.extend([flag, as_str(val)])
             elif "pattern" in (arg or {}):
-                formatted = arg["pattern"].replace("{value}", as_str(val))
+                pattern = arg["pattern"]
+                formatted = pattern.replace("{value}", as_str(val))
                 if formatted.strip():
                     flagged.append(formatted)
             elif (arg or {}).get("raw"):
@@ -119,7 +148,7 @@ class OptionsPanel(QWidget):
         positional_sorted = [p for _, p in sorted(positional, key=lambda t: t[0])]
         argv: List[str] = [str(sp)] + positional_sorted + flagged + raw
 
-        # Pretty: resolve container path if present
+        # Pretty preview with resolved container path (if present)
         if len(argv) >= 2 and not argv[1].startswith("-"):
             cpath = Path(argv[1])
             if not cpath.is_absolute():
@@ -130,28 +159,41 @@ class OptionsPanel(QWidget):
 
     # ---------- Internals ----------
     def _build_ui(self):
-        outer = QVBoxLayout(self); outer.setContentsMargins(0,0,0,0); outer.setSpacing(8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(8)
 
-        # header (presets)
+        # Header: Presets + Command preview
         top = QHBoxLayout()
-        self.cmbPreset = QComboBox(self); self.cmbPreset.addItem("— Select preset —")
-        self.btnApplyPreset = QPushButton("Apply", self); self.btnApplyPreset.setEnabled(False)
-        top.addWidget(QLabel("Preset:", self)); top.addWidget(self.cmbPreset, 1); top.addWidget(self.btnApplyPreset)
+        self.cmbPreset = QComboBox(self)
+        self.cmbPreset.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.cmbPreset.addItem("— Select preset —")
+        self.btnApplyPreset = QPushButton("Apply", self)
+        self.btnApplyPreset.setEnabled(False)
+        top.addWidget(QLabel("Preset:", self))
+        top.addWidget(self.cmbPreset, 1)
+        top.addWidget(self.btnApplyPreset)
         outer.addLayout(top)
 
-        # scrollable form
-        self.scroll = QScrollArea(self); self.scroll.setWidgetResizable(True)
+        # Scrollable form area
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
         self.formHost = QWidget(self.scroll)
-        self.formLayout = QVBoxLayout(self.formHost); self.formLayout.setContentsMargins(0,0,0,0)
+        self.formLayout = QVBoxLayout(self.formHost)
+        self.formLayout.setContentsMargins(0, 0, 0, 0)
+        self.formLayout.setSpacing(6)
         self.scroll.setWidget(self.formHost)
         outer.addWidget(self.scroll, 1)
 
-        # command preview
+        # Command preview
         outer.addWidget(QLabel("Command preview:", self))
-        self.txtCmd = QTextEdit(self); self.txtCmd.setReadOnly(True); self.txtCmd.setFixedHeight(72); self.txtCmd.setLineWrapMode(QTextEdit.NoWrap)
+        self.txtCmd = QTextEdit(self)
+        self.txtCmd.setReadOnly(True)
+        self.txtCmd.setFixedHeight(72)
+        self.txtCmd.setLineWrapMode(QTextEdit.NoWrap)
         outer.addWidget(self.txtCmd)
 
-        # wire
+        # Wiring
         self.cmbPreset.currentIndexChanged.connect(self._preset_changed)
         self.btnApplyPreset.clicked.connect(self._apply_preset_clicked)
 
@@ -173,60 +215,88 @@ class OptionsPanel(QWidget):
                 self.cmbPreset.addItem(p.get("name", "preset"), userData=p.get("name"))
             self.btnApplyPreset.setEnabled(len(self.presets) > 0)
         except Exception:
-            self.presets = []; self.btnApplyPreset.setEnabled(False)
+            self.presets = []
+            self.btnApplyPreset.setEnabled(False)
 
     def populate_from_schema(self):
         self._building = True
         self.fields.clear()
+        # clear previous form
         while self.formLayout.count():
-            it = self.formLayout.takeAt(0); w = it.widget()
-            if w: w.deleteLater()
+            item = self.formLayout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
         self.widgets.clear()
 
         for grp in self.schema.get("groups", []):
             box = QGroupBox(grp.get("title", ""), self.formHost)
-            g = QGridLayout(box); g.setContentsMargins(8,8,8,8); g.setHorizontalSpacing(8); g.setVerticalSpacing(6)
+            g = QGridLayout(box)
+            g.setContentsMargins(8, 8, 8, 8)
+            g.setHorizontalSpacing(8)
+            g.setVerticalSpacing(6)
 
             row = 0
             hint = grp.get("hint")
             if hint:
-                lbl = QLabel(hint, box); lbl.setWordWrap(True); lbl.setStyleSheet("color:#888;")
-                g.addWidget(lbl, row, 0, 1, 2); row += 1
+                lblHint = QLabel(hint, box)
+                lblHint.setWordWrap(True)
+                lblHint.setStyleSheet("color:#888;")
+                g.addWidget(lblHint, row, 0, 1, 2)
+                row += 1
 
             for f in grp.get("fields", []):
                 key = f.get("key")
-                if not key: continue
+                if not key:
+                    continue
                 self.fields.append(f)
                 label = QLabel(f.get("label", key), box)
-                w = self._create_widget_for_field(f, box); self.widgets[key] = w
-                g.addWidget(label, row, 0); g.addWidget(w, row, 1); row += 1
+                w = self._create_widget_for_field(f, box)
+                self.widgets[key] = w
+                g.addWidget(label, row, 0)
+                g.addWidget(w, row, 1)
+                row += 1
 
             self.formLayout.addWidget(box)
 
         self.formLayout.addStretch(1)
         self._building = False
-        self.values_changed()
+        self.values_changed()  # populate preview
 
     def _create_widget_for_field(self, f: Dict[str, Any], parent: QWidget) -> QWidget:
-        t = f.get("type"); default = f.get("default")
+        t = f.get("type")
+        default = f.get("default")
 
         if t == "bool":
-            w = QCheckBox(parent); w.setChecked(bool(default)); w.toggled.connect(self._field_changed); return w
+            w = QCheckBox(parent)
+            w.setChecked(bool(default))
+            w.toggled.connect(self._field_changed)
+            return w
 
         if t == "int":
-            w = QSpinBox(parent); w.setRange(int(f.get("min", -10**9)), int(f.get("max", 10**9)))
-            w.setValue(int(default if default is not None else 0)); w.valueChanged.connect(self._field_changed); return w
+            w = QSpinBox(parent)
+            w.setRange(int(f.get("min", -10**9)), int(f.get("max", 10**9)))
+            w.setValue(int(default if default is not None else 0))
+            w.valueChanged.connect(self._field_changed)
+            return w
 
         if t == "enum":
-            w = QComboBox(parent); choices = f.get("choices", [])
-            for ch in choices: w.addItem(str(ch), userData=ch)
-            if default in choices: w.setCurrentIndex(choices.index(default))
-            w.currentIndexChanged.connect(self._field_changed); return w
+            w = QComboBox(parent)
+            choices = f.get("choices", [])
+            for ch in choices:
+                w.addItem(str(ch), userData=ch)
+            if default in choices:
+                w.setCurrentIndex(choices.index(default))
+            w.currentIndexChanged.connect(self._field_changed)
+            return w
 
         if t in ("file", "dir"):
-            wrap = QWidget(parent); h = QHBoxLayout(wrap); h.setContentsMargins(0,0,0,0)
+            wrap = QWidget(parent)
+            h = QHBoxLayout(wrap)
+            h.setContentsMargins(0, 0, 0, 0)
             line = QLineEdit(wrap)
-            if isinstance(default, str): line.setText(default)
+            if isinstance(default, str):
+                line.setText(default)
             btn = QPushButton("Browse…", wrap)
 
             def browse():
@@ -239,52 +309,77 @@ class OptionsPanel(QWidget):
                     start_dir = repo_root()
                     p = QFileDialog.getExistingDirectory(wrap, "Select folder", str(start_dir))
                 if p:
-                    line.setText(p); self._field_changed()
+                    line.setText(p)
+                    self._field_changed()
 
-            btn.clicked.connect(browse); line.textChanged.connect(self._field_changed)
-            h.addWidget(line, 1); h.addWidget(btn)
+            btn.clicked.connect(browse)
+            line.textChanged.connect(self._field_changed)
+            h.addWidget(line, 1)
+            h.addWidget(btn)
             wrap._value_line = line  # type: ignore[attr-defined]
             return wrap
 
-        # string
+        # string (single or multiline)
         if f.get("multiline"):
             w = QTextEdit(parent)
-            if isinstance(default, str): w.setPlainText(default)
-            w.textChanged.connect(self._field_changed); return w
+            if isinstance(default, str):
+                w.setPlainText(default)
+            w.textChanged.connect(self._field_changed)
+            return w
         else:
             w = QLineEdit(parent)
-            if isinstance(default, str): w.setText(default)
-            if f.get("placeholder"): w.setPlaceholderText(f["placeholder"])
-            w.textChanged.connect(self._field_changed); return w
+            if isinstance(default, str):
+                w.setText(default)
+            if f.get("placeholder"):
+                w.setPlaceholderText(f["placeholder"])
+            w.textChanged.connect(self._field_changed)
+            return w
 
     def _get_widget_value(self, key: str, w: QWidget) -> Any:
         f = next((x for x in self.fields if x.get("key") == key), None)
-        if not f: return None
+        if not f:
+            return None
         t = f.get("type")
-        if t == "bool" and isinstance(w, QCheckBox): return bool(w.isChecked())
-        if t == "int" and isinstance(w, QSpinBox): return int(w.value())
-        if t == "enum" and isinstance(w, QComboBox): return w.currentData() if w.currentData() is not None else w.currentText()
-        if hasattr(w, "_value_line"): return getattr(w, "_value_line").text().strip()  # file/dir wrapper
-        if isinstance(w, QLineEdit): return w.text().strip()
-        if isinstance(w, QTextEdit): return w.toPlainText().strip()
+        if t == "bool" and isinstance(w, QCheckBox):
+            return bool(w.isChecked())
+        if t == "int" and isinstance(w, QSpinBox):
+            return int(w.value())
+        if t == "enum" and isinstance(w, QComboBox):
+            return w.currentData() if w.currentData() is not None else w.currentText()
+        if isinstance(w, QWidget) and hasattr(w, "_value_line"):
+            # file/dir wrapper returns the line edit content
+            return getattr(w, "_value_line").text().strip()  # type: ignore[attr-defined]
+        if isinstance(w, QLineEdit):
+            return w.text().strip()
+        if isinstance(w, QTextEdit):
+            return w.toPlainText().strip()
         return None
 
     def _set_widget_value(self, key: str, val: Any):
         w = self.widgets.get(key)
-        if not w: return
-        if isinstance(w, QCheckBox): w.setChecked(bool(val)); return
-        if isinstance(w, QSpinBox):
-            try: w.setValue(int(val))
-            except Exception: pass
+        if not w:
             return
-        if isinstance(w, QComboBox):
+        if isinstance(w, QCheckBox):
+            w.setChecked(bool(val))
+        elif isinstance(w, QSpinBox):
+            try:
+                w.setValue(int(val))
+            except Exception:
+                pass
+        elif isinstance(w, QComboBox):
             idx = -1
             for i in range(w.count()):
-                if w.itemData(i) == val or w.itemText(i) == str(val): idx = i; break
-            if idx >= 0: w.setCurrentIndex(idx); return
-        if hasattr(w, "_value_line"): getattr(w, "_value_line").setText(str(val)); return
-        if isinstance(w, QLineEdit): w.setText(str(val)); return
-        if isinstance(w, QTextEdit): w.setPlainText(str(val)); return
+                if w.itemData(i) == val or w.itemText(i) == str(val):
+                    idx = i
+                    break
+            if idx >= 0:
+                w.setCurrentIndex(idx)
+        elif isinstance(w, QWidget) and hasattr(w, "_value_line"):
+            getattr(w, "_value_line").setText(str(val))  # type: ignore[attr-defined]
+        elif isinstance(w, QLineEdit):
+            w.setText(str(val))
+        elif isinstance(w, QTextEdit):
+            w.setPlainText(str(val))
 
     def _set_values(self, values: Dict[str, Any]):
         for k, v in values.items():
@@ -295,22 +390,27 @@ class OptionsPanel(QWidget):
 
     def _apply_preset_clicked(self):
         name = self.cmbPreset.currentData()
-        if name: self.apply_preset(name)
+        if name:
+            self.apply_preset(name)
 
     def _field_changed(self, *args):
-        if self._building: return
-        self.update_visibility(); self.values_changed()
+        if self._building:
+            return
+        self.update_visibility()
+        self.values_changed()
 
     def update_visibility(self):
         v = self.values()
         for f in self.fields:
-            w = self.widgets.get(f.get("key"))
-            if not w: continue
+            key = f.get("key")
+            w = self.widgets.get(key)
+            if not w:
+                continue
             visible = True
             cond = f.get("visible_if")
             if cond:
-                for depk, depv in cond.items():
-                    visible = (v.get(depk) == depv)
+                for dep_key, dep_val in cond.items():
+                    visible = (v.get(dep_key) == dep_val)
             w.setVisible(visible)
 
     def values_changed(self):
