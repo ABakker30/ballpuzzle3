@@ -52,6 +52,10 @@ class SolveTab(QWidget):
         self._jsonl_last_size: int = 0
         self._jsonl_buf: str = ""
 
+        # world-file follow state
+        self.world_path: Optional[Path] = None
+        self._last_world_sig: Optional[Tuple[int, int]] = None  # (mtime_ns, size)
+
         self._build_ui()
         self._init_followers()
 
@@ -143,23 +147,12 @@ class SolveTab(QWidget):
 
     # ---------- world file handling ----------
     def open_world_file(self, path: Path):
-        """Parse a *.current.world.json (or sample) and update labels + viewer."""
+        """User chose a world file; start following it and send once."""
         self._current_world_file = path
+        self.world_path = Path(path)
+        self._last_world_sig = None
         self.lblFile.setText(str(path))
-        try:
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
-        except Exception:
-            self._clear_stats_world_only()
-            return
-
-        self.lblRun.setText(str(data.get("run_id", "—")))
-        self.lblContainer.setText(str(data.get("container_name", "—")))
-        total = 25
-        placed = sum(len(p.get("centers", [])) > 0 for p in data.get("pieces", []))
-        self.lblPlaced.setText(f"{placed} / {total}")
-
-        # Push to viewer
-        self._send_world_to_viewer(data)
+        self._read_world_and_send()  # immediate first push
 
     def _clear_stats_world_only(self):
         self.lblRun.setText("—")
@@ -218,6 +211,17 @@ class SolveTab(QWidget):
 
     # ---------- progress polling (snapshot + jsonl tail) ----------
     def _poll_tick(self, force: bool = False):
+        # world file (follow if selected)
+        try:
+            if self.world_path and self.world_path.exists():
+                stw = self.world_path.stat()
+                sigw = (int(stw.st_mtime_ns), int(stw.st_size))
+                if force or sigw != self._last_world_sig:
+                    self._last_world_sig = sigw
+                    self._read_world_and_send()
+        except Exception:
+            pass
+
         # progress.json snapshot
         try:
             st = self.progress_json.stat()
@@ -305,3 +309,23 @@ class SolveTab(QWidget):
                 self.lblRate.setText(f"{float(rate):.1f}")
             except Exception:
                 self.lblRate.setText(str(rate))
+
+    def _read_world_and_send(self) -> None:
+        """Read current world file and push to viewer; ignore partial writes."""
+        if not self.world_path:
+            return
+        try:
+            txt = self.world_path.read_text(encoding="utf-8-sig", errors="ignore")
+            data = json.loads(txt)
+        except Exception:
+            return  # partial write or transient parse error; try again next tick
+
+        # Update left-side labels from world file
+        self.lblRun.setText(str(data.get("run_id", "—")))
+        self.lblContainer.setText(str(data.get("container_name", "—")))
+        total = int(data.get("total", 25)) if isinstance(data.get("total"), (int, float)) else 25
+        placed = sum(len(p.get("centers", [])) > 0 for p in data.get("pieces", []))
+        self.lblPlaced.setText(f"{placed} / {total}")
+
+        # Push to viewer (already tolerant of centers/world_centers)
+        self._send_world_to_viewer(data)

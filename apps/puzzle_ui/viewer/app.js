@@ -1,11 +1,19 @@
-// apps/puzzle_ui/viewer/app.js
 import * as THREE from './libs/three/three.module.js';
 import { OrbitControls } from './libs/three/examples/jsm/controls/OrbitControls.js';
 
+// On-screen logger so black screens can't hide errors
 const rootEl = document.getElementById('app');
+const overlay = document.getElementById('overlay');
+function logUI(msg) {
+  if (!overlay) return;
+  overlay.textContent = String(msg) + '\n' + overlay.textContent.slice(0, 2000);
+}
+window.addEventListener('error', e => logUI('[error] ' + e.message));
+window.addEventListener('unhandledrejection', e => logUI('[promise] ' + (e.reason?.message || e.reason || 'rejection')));
+logUI('[viewer] booting…');
+
 let renderer, scene, camera, controls;
-let lastRunId = null;
-let lastBBoxKey = null;
+let lastRunId = null, lastBBoxKey = null;
 
 const PALETTE = [
   '#FF6B6B', '#4D96FF', '#FFD166', '#06D6A0', '#9B5DE5',
@@ -15,22 +23,20 @@ const PALETTE = [
   '#FFBE0B', '#7CB518', '#2EC4B6', '#B5179E', '#3F88C5'
 ];
 
-// ---------- init ----------
 function initThree() {
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio || 1);
-  // nicer tonemapping / color
+  // If your local three is older, you can swap the next line to: renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
-
+  renderer.toneMappingExposure = 1.5;
   renderer.setSize(rootEl.clientWidth, rootEl.clientHeight);
   rootEl.appendChild(renderer.domElement);
 
   scene = new THREE.Scene();
 
   camera = new THREE.OrthographicCamera(-5, 5, 5, -5, -100, 100);
-  camera.position.set(5, 5, 5);
+  camera.position.set(6, 6, 6);
   camera.up.set(0, 1, 0);
   camera.lookAt(0, 0, 0);
 
@@ -39,93 +45,78 @@ function initThree() {
   controls.enableRotate = true;
   controls.enableZoom = true;
 
-  // simple physically-plausible-ish light rig
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x111122, 0.35);
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x111122, 0.6);
   scene.add(hemi);
-  const key = new THREE.DirectionalLight(0xffffff, 0.9);
-  key.position.set(1.5, 2.0, 1.0);
-  scene.add(key);
-  const fill = new THREE.DirectionalLight(0xffffff, 0.3);
-  fill.position.set(-2.0, 1.0, 0.5);
-  scene.add(fill);
-  const rim = new THREE.DirectionalLight(0xffffff, 0.6);
-  rim.position.set(-1.0, 1.5, -2.0);
-  scene.add(rim);
+  const key = new THREE.DirectionalLight(0xffffff, 1.3);  key.position.set(2, 3, 1); scene.add(key);
+  const fill = new THREE.DirectionalLight(0xffffff, 0.7); fill.position.set(-3, 1.5, 1); scene.add(fill);
+  const rim  = new THREE.DirectionalLight(0xffffff, 1.0); rim.position.set(-2, 2, -3);  scene.add(rim);
 
   const axes = new THREE.AxesHelper(2.5);
   scene.add(axes);
 
+  // fallback so you always see something
+  const fallback = new THREE.Mesh(
+    new THREE.SphereGeometry(0.6, 24, 16),
+    new THREE.MeshStandardMaterial({ color: 0x8888ff, metalness: 0.7, roughness: 0.35 })
+  );
+  fallback.name = '__fallback__';
+  scene.add(fallback);
+
   animate();
   window.addEventListener('resize', onResize);
+  logUI('[viewer] three.js ready');
 }
 
 function onResize() {
-  const w = rootEl.clientWidth, h = rootEl.clientHeight;
-  const aspect = Math.max(1e-6, w / Math.max(1, h));
-  const view = 6;
+  const w = rootEl.clientWidth, h = Math.max(1, rootEl.clientHeight);
+  const aspect = w / h, view = 6;
   camera.left = -view * aspect;
-  camera.right = view * aspect;
-  camera.top = view;
+  camera.right =  view * aspect;
+  camera.top =  view;
   camera.bottom = -view;
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
 }
-
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
   renderer.render(scene, camera);
 }
 
-// ---------- helpers ----------
+// helpers
 function letterId(str) {
-  // Map 'A'..'Z','AA'.. to 0.. (base-26), then wrap into palette length
   const s = String(str).toUpperCase();
-  let n = 0;
-  for (let i = 0; i < s.length; i++) n = n * 26 + (s.charCodeAt(i) - 64);
+  let n = 0; for (let i = 0; i < s.length; i++) n = n * 26 + (s.charCodeAt(i) - 64);
   return (n - 1) % PALETTE.length;
 }
-
 function normalizePieces(raw) {
   const arr = Array.isArray(raw) ? raw : [];
-  return arr.map((p, idx) => {
-    const centers =
-      Array.isArray(p.centers) ? p.centers :
-      Array.isArray(p.world_centers) ? p.world_centers :
-      [];
+  const out = [];
+  for (let idx = 0; idx < arr.length; idx++) {
+    const p = arr[idx] || {};
+    const centers = Array.isArray(p.centers) ? p.centers :
+                    Array.isArray(p.world_centers) ? p.world_centers : [];
     let idNorm;
     if (typeof p.id === 'number') idNorm = p.id;
     else if (typeof p.id === 'string') idNorm = letterId(p.id);
     else idNorm = idx;
-
-    const name = p.name || (typeof p.id === 'string' ? p.id : `P${String(idNorm).padStart(2, '0')}`);
-    return { id: idNorm, name, centers };
-  });
+    const name = p.name ? p.name : (typeof p.id === 'string' ? p.id : ('P' + String(idNorm).padStart(2, '0')));
+    out.push({ id: idNorm, name, centers });
+  }
+  return out;
 }
-
 function computeBbox(pieces, r) {
-  // Build from all centers
-  let minX = Infinity, minY = Infinity, minZ = Infinity;
-  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  let any = false;
-  for (const p of pieces) {
-    for (const c of p.centers) {
-      if (!Array.isArray(c) || c.length < 3) continue;
-      const [x, y, z] = c;
-      if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
-      any = true;
-      if (x < minX) minX = x; if (y < minY) minY = y; if (z < minZ) minZ = z;
-      if (x > maxX) maxX = x; if (y > maxY) maxY = y; if (z > maxZ) maxZ = z;
-    }
+  let minX=Infinity, minY=Infinity, minZ=Infinity, maxX=-Infinity, maxY=-Infinity, maxZ=-Infinity, any=false;
+  for (const p of pieces) for (const c of (p.centers||[])) {
+    if (!Array.isArray(c) || c.length<3) continue;
+    const x=c[0],y=c[1],z=c[2]; if(!isFinite(x)||!isFinite(y)||!isFinite(z)) continue;
+    any=true; if(x<minX)minX=x; if(y<minY)minY=y; if(z<minZ)minZ=z;
+             if(x>maxX)maxX=x; if(y>maxY)maxY=y; if(z>maxZ)maxZ=z;
   }
-  if (!any) {
-    // fallback tiny bbox around origin
-    return { min: [-r, -r, -r], max: [r, r, r] };
-  }
-  const pad = Math.max(r * 1.5, 0.25);
-  return { min: [minX - pad, minY - pad, minZ - pad], max: [maxX + pad, maxY + pad, maxZ + pad] };
+  if (!any) return { min:[-r,-r,-r], max:[r,r,r] };
+  const pad = Math.max(r*1.5, 0.25);
+  return { min:[minX-pad,minY-pad,minZ-pad], max:[maxX+pad,maxY+pad,maxZ+pad] };
 }
-
 function fitOrthoToBbox(bbox) {
   const min = new THREE.Vector3().fromArray(bbox.min);
   const max = new THREE.Vector3().fromArray(bbox.max);
@@ -134,18 +125,20 @@ function fitOrthoToBbox(bbox) {
 
   const margin = 1.25;
   const longest = Math.max(size.x, size.y, size.z) * margin;
-  const aspect = (rootEl.clientWidth || 1) / (rootEl.clientHeight || 1);
+  const aspect = (rootEl.clientWidth || 1) / Math.max(1, (rootEl.clientHeight || 1));
 
-  camera.left = -longest * aspect * 0.6;
-  camera.right = longest * aspect * 0.6;
-  camera.top = longest * 0.6;
+  camera.left   = -longest * aspect * 0.6;
+  camera.right  =  longest * aspect * 0.6;
+  camera.top    =  longest * 0.6;
   camera.bottom = -longest * 0.6;
 
   camera.position.set(center.x + longest, center.y + longest, center.z + longest);
   camera.lookAt(center);
   camera.updateProjectionMatrix();
-}
 
+  controls.target.copy(center);
+  controls.update();
+}
 function clearSceneMeshes() {
   const toRemove = [];
   scene.traverse(o => { if (o.userData && o.userData.isPieceMesh) toRemove.push(o); });
@@ -156,71 +149,72 @@ function clearSceneMeshes() {
   });
 }
 
-// ---------- main payload entry ----------
+// payload entry
 function drawPayload(payload) {
-  // Normalize schema differences
-  const r = (typeof payload?.r === 'number') ? payload.r : 0.5;
-  const pieces = normalizePieces(payload?.pieces);
+  try {
+    const fb = scene.getObjectByName('__fallback__');
+    if (fb) scene.remove(fb);
 
-  // Choose/compute bbox
-  let bbox = payload?.bbox;
-  if (!bbox || !Array.isArray(bbox.min) || !Array.isArray(bbox.max)) {
-    bbox = computeBbox(pieces, r);
-  }
+    const r = (payload && typeof payload.r === 'number') ? payload.r : 0.5;
+    const pieces = normalizePieces(payload && payload.pieces);
 
-  const isNewRun = payload?.run_id !== lastRunId;
-  const bboxKey = JSON.stringify(bbox);
-
-  clearSceneMeshes();
-
-  // Fit only on new run or bbox change (keeps user zoom/angle stable)
-  if (isNewRun || bboxKey !== lastBBoxKey) {
-    fitOrthoToBbox(bbox);
-    lastRunId = payload?.run_id ?? lastRunId;
-    lastBBoxKey = bboxKey;
-  }
-
-  // a bit smoother for nicer specular highlights (tune if perf dips)
-  const sphereGeom = new THREE.SphereGeometry(r, 24, 16);
-
-  pieces.forEach(piece => {
-    const centers = piece.centers || [];
-    if (!centers.length) return;
-    const color = new THREE.Color(PALETTE[piece.id % PALETTE.length]);
-    const mat = new THREE.MeshStandardMaterial({
-      color,
-      metalness: 0.85,
-      roughness: 0.25
-      // envMapIntensity: 1.0  // leave for later if we add an env map
-    });
-    const inst = new THREE.InstancedMesh(sphereGeom, mat, centers.length);
-    inst.userData.isPieceMesh = true;
-
-    const tmp = new THREE.Object3D();
-    for (let i = 0; i < centers.length; i++) {
-      const c = centers[i];
-      if (!Array.isArray(c) || c.length < 3) continue;
-      tmp.position.set(c[0], c[1], c[2]);
-      tmp.updateMatrix();
-      inst.setMatrixAt(i, tmp.matrix);
+    let bbox = payload && payload.bbox;
+    if (!bbox || !Array.isArray(bbox.min) || !Array.isArray(bbox.max)) {
+      bbox = computeBbox(pieces, r);
     }
-    inst.instanceMatrix.needsUpdate = true;
-    scene.add(inst);
-  });
+
+    const isNewRun = (payload && payload.run_id) !== lastRunId;
+    const bboxKey = JSON.stringify(bbox);
+
+    clearSceneMeshes();
+
+    if (isNewRun || bboxKey !== lastBBoxKey) {
+      fitOrthoToBbox(bbox);
+      lastRunId = payload && payload.run_id ? payload.run_id : lastRunId;
+      lastBBoxKey = bboxKey;
+    }
+
+    const sphereGeom = new THREE.SphereGeometry(r, 24, 16);
+
+    for (const piece of pieces) {
+      const centers = piece.centers || [];
+      if (!centers.length) continue;
+
+      const color = new THREE.Color(PALETTE[piece.id % PALETTE.length]);
+      const mat = new THREE.MeshStandardMaterial({ color, metalness: 0.85, roughness: 0.25 });
+
+      const inst = new THREE.InstancedMesh(sphereGeom, mat, centers.length);
+      inst.userData.isPieceMesh = true;
+
+      const tmp = new THREE.Object3D();
+      for (let i = 0; i < centers.length; i++) {
+        const c = centers[i];
+        if (!Array.isArray(c) || c.length < 3) continue;
+        tmp.position.set(c[0], c[1], c[2]);
+        tmp.updateMatrix();
+        inst.setMatrixAt(i, tmp.matrix);
+      }
+      inst.instanceMatrix.needsUpdate = true;
+      scene.add(inst);
+    }
+    logUI('[viewer] payload rendered (pieces=' + pieces.length + ')');
+  } catch (e) {
+    logUI('[drawPayload exception] ' + (e.message || e));
+  }
 }
 
-// ---------- WebChannel hookup ----------
+// WebChannel (optional)
 function setupWebChannel() {
-  // qwebchannel.js must be loaded in index.html
+  if (!(window.qt && window.qt.webChannelTransport)) {
+    logUI('[warn] WebChannel not available — viewer will wait for manual payloads');
+    return;
+  }
   // eslint-disable-next-line no-undef
   new QWebChannel(qt.webChannelTransport, channel => {
     const bridge = channel.objects.bridge;
-    if (!bridge) {
-      console.error('[viewer] bridge object missing');
-      return;
-    }
+    if (!bridge) { logUI('[error] bridge missing'); return; }
     bridge.sendPayload.connect(drawPayload);
-    console.log('[viewer] WebChannel connected');
+    logUI('[viewer] WebChannel connected');
   });
 }
 
