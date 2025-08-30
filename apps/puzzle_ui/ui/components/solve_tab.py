@@ -19,12 +19,13 @@ else:
 
 import json
 from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict
 
 from PySide6.QtCore import Qt, QUrl, QTimer, QFileSystemWatcher, QObject, Signal
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QSizePolicy,
     QGroupBox, QGridLayout, QLabel, QPushButton, QMessageBox,
-    QComboBox, QCheckBox, QSlider
+    QComboBox, QCheckBox, QSlider, QFormLayout
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
@@ -67,6 +68,9 @@ class SolveTab(QWidget):
         # --- Reveal (current geometry) state ---
         self.reveal_count: int = -1                  # -1 = show all
         self._last_world_data: Optional[dict] = None # cache last loaded world data
+
+        # ---- Totals (all runs) ----
+        self._agg_by_run = defaultdict(lambda: {"best": -1, "attempts": 0})
 
         self._build_ui()
         self._init_followers()
@@ -114,6 +118,20 @@ class SolveTab(QWidget):
             sgrid.addWidget(QLabel(lab, stats), i, 0)
             sgrid.addWidget(w, i, 1)
         lbox.addWidget(stats, 0)
+
+        # Totals (all runs) box and aggregator
+        totals_box = QGroupBox("Totals (all runs)")
+        totals_form = QFormLayout(totals_box)
+
+        self.lbl_best_all = QLabel("0")
+        self.lbl_attempts_all = QLabel("0")
+        self.btn_reset_totals = QPushButton("Reset totals")
+
+        totals_form.addRow("Best depth:", self.lbl_best_all)
+        totals_form.addRow("Attempts:",   self.lbl_attempts_all)
+        totals_form.addRow(self.btn_reset_totals)
+
+        lbox.addWidget(totals_box)
 
         # Manual refresh
         self.btnRefresh = QPushButton("Refresh viewer  stats", left)
@@ -203,6 +221,9 @@ class SolveTab(QWidget):
 
         # Reveal wiring
         self.revealSlider.valueChanged.connect(self._on_reveal_slider)
+
+        # Totals wiring
+        self.btn_reset_totals.clicked.connect(self._reset_run_aggregates)
 
     def _load_viewer_index(self):
         viewer_index = app_root() / "viewer" / "index.html"
@@ -380,6 +401,7 @@ class SolveTab(QWidget):
         except Exception:
             return
         self._apply_progress_obj(data)
+        self._ingest_progress_obj(data)
 
     def _consume_jsonl_bytes(self, b: bytes):
         s = b.decode("utf-8", errors="ignore").replace("\r", "")
@@ -406,6 +428,7 @@ class SolveTab(QWidget):
                 continue
         if last_obj:
             self._apply_progress_obj(last_obj)
+            self._ingest_progress_obj(last_obj)
 
     def _apply_progress_obj(self, data: Dict[str, Any]):
         rid = data.get("run_id") or (str(data.get("run")) if data.get("run") is not None else None)
@@ -431,6 +454,13 @@ class SolveTab(QWidget):
                 self.lblRate.setText(f"{float(rate):.1f}")
             except Exception:
                 self.lblRate.setText(str(rate))
+
+        # Update totals
+        if rid is not None:
+            self._agg_by_run[rid]["best"] = max(self._agg_by_run[rid]["best"], best if best is not None else -1)
+            self._agg_by_run[rid]["attempts"] += attempts if attempts is not None else 0
+            self.lbl_best_all.setText(str(max(r.get("best", -1) for r in self._agg_by_run.values())))
+            self.lbl_attempts_all.setText(str(sum(r.get("attempts", 0) for r in self._agg_by_run.values())))
 
     def _read_world_and_send(self) -> None:
         """Read current world file and push to viewer; ignore partial writes."""
@@ -633,3 +663,42 @@ class SolveTab(QWidget):
         # Filter and push again
         filtered = self._filter_data_by_reveal(self._last_world_data, self.reveal_count)
         self._really_send_to_viewer(filtered)
+
+    def _reset_run_aggregates(self) -> None:
+        self._agg_by_run.clear()
+        self.lbl_best_all.setText("0")
+        self.lbl_attempts_all.setText("0")
+
+    def _ingest_progress_obj(self, obj: dict):
+        """
+        Update cross-run aggregates from a single progress JSON object.
+        Accepts keys seen in v1.1 progress lines:
+          {"event":"progress","run":0,"best_depth":16,"attempts":61167,...}
+        """
+        if not isinstance(obj, dict):
+            return
+        run = obj.get("run") if "run" in obj else obj.get("run_id")
+        if run is None:
+            return
+        # best_depth may be absent on some lines—treat as None
+        best = obj.get("best_depth")
+        attempts = obj.get("attempts", 0)
+        try:
+            best = int(best) if best is not None else None
+            attempts = int(attempts)
+        except Exception:
+            return
+
+        rec = self._agg_by_run[run]
+        if best is not None and best > rec["best"]:
+            rec["best"] = best
+        # attempts is last-seen for that run (monotonic)
+        if attempts > rec["attempts"]:
+            rec["attempts"] = attempts
+
+        # Compute aggregates
+        if self._agg_by_run:
+            best_all = max((v["best"] for v in self._agg_by_run.values()), default=-1)
+            attempts_all = sum(v["attempts"] for v in self._agg_by_run.values())
+            self.lbl_best_all.setText(str(max(0, best_all)))
+            self.lbl_attempts_all.setText(str(attempts_all))
