@@ -23,7 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from PySide6.QtCore import Qt, QUrl, QTimer, QFileSystemWatcher, QObject, Signal
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QSizePolicy,
-    QGroupBox, QGridLayout, QLabel, QPushButton, QMessageBox
+    QGroupBox, QGridLayout, QLabel, QPushButton, QMessageBox,
+    QComboBox, QCheckBox, QSlider
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
@@ -55,6 +56,17 @@ class SolveTab(QWidget):
         # world-file follow state
         self.world_path: Optional[Path] = None
         self._last_world_sig: Optional[Tuple[int, int]] = None  # (mtime_ns, size)
+
+        # --- timeline playback state (no solver changes required) ---
+        self.timeline_frames: List[Path] = []     # ordered list of snapshot frames
+        self.timeline_index: int = -1             # current frame index
+        self.play_timer = QTimer(self)            # playback timer
+        self.play_speed_ms = 600                  # default ~1x
+        self.live_extend = True                   # extend timeline when new frames arrive
+
+        # --- Reveal (current geometry) state ---
+        self.reveal_count: int = -1                  # -1 = show all
+        self._last_world_data: Optional[dict] = None # cache last loaded world data
 
         self._build_ui()
         self._init_followers()
@@ -108,6 +120,60 @@ class SolveTab(QWidget):
         self.btnRefresh.clicked.connect(self.refresh_all)
         lbox.addWidget(self.btnRefresh)
 
+        # --- Timeline controls (Build mode) ---
+        tl = QGroupBox("Timeline (snapshots)", left)
+        tlbox = QGridLayout(tl)
+
+        # Mode: Full | Build (timeline)
+        self.cmbMode = QComboBox(tl)
+        self.cmbMode.addItem("Full", userData="full")
+        self.cmbMode.addItem("Build (timeline)", userData="build")
+        tlbox.addWidget(QLabel("Mode:", tl), 0, 0)
+        tlbox.addWidget(self.cmbMode, 0, 1)
+
+        # Completion slider
+        self.slider = QSlider(Qt.Horizontal, tl)
+        self.slider.setRange(0, 0)
+        self.slider.setEnabled(False)
+        tlbox.addWidget(QLabel("Completion:", tl), 1, 0)
+        tlbox.addWidget(self.slider, 1, 1)
+
+        # Frame label (index / count)
+        self.lblFrame = QLabel("— / —", tl)
+        tlbox.addWidget(self.lblFrame, 1, 2)
+
+        # Play / Speed
+        self.btnPlay = QPushButton("Play", tl)
+        self.btnPlay.setEnabled(False)
+        self.cmbSpeed = QComboBox(tl)
+        self.cmbSpeed.addItems(["0.5×", "1×", "2×"])
+        self.cmbSpeed.setCurrentIndex(1)  # 1×
+        tlbox.addWidget(self.btnPlay, 2, 1)
+        tlbox.addWidget(self.cmbSpeed, 2, 2)
+
+        # Live extend (auto-append new frames)
+        self.chkLive = QCheckBox("Extend as new frames arrive", tl)
+        self.chkLive.setChecked(True)
+        tlbox.addWidget(self.chkLive, 3, 1, 1, 2)
+
+        lbox.addWidget(tl)
+
+        # --- Reveal controls (current geometry only) ---
+        rev = QGroupBox("Reveal (current geometry)", left)
+        rgrid = QGridLayout(rev)
+
+        self.revealSlider = QSlider(Qt.Horizontal, rev)
+        self.revealSlider.setEnabled(False)
+        self.revealSlider.setRange(0, 0)
+
+        self.lblReveal = QLabel("0 / 0", rev)
+
+        rgrid.addWidget(QLabel("Pieces to show:", rev), 0, 0)
+        rgrid.addWidget(self.revealSlider,               0, 1)
+        rgrid.addWidget(self.lblReveal,                  0, 2)
+
+        lbox.addWidget(rev)
+
         # Right: viewer
         self.web = QWebEngineView(self)
 
@@ -124,6 +190,20 @@ class SolveTab(QWidget):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
+        # Timeline wiring
+        self.cmbMode.currentIndexChanged.connect(self._on_mode_changed)
+        self.slider.valueChanged.connect(self._on_slider_changed)
+        self.btnPlay.clicked.connect(self._on_play_clicked)
+        self.cmbSpeed.currentIndexChanged.connect(self._on_speed_changed)
+        self.chkLive.toggled.connect(lambda v: setattr(self, "live_extend", bool(v)))
+
+        # playback timer
+        self.play_timer.setInterval(self.play_speed_ms)
+        self.play_timer.timeout.connect(self._on_play_tick)
+
+        # Reveal wiring
+        self.revealSlider.valueChanged.connect(self._on_reveal_slider)
+
     def _load_viewer_index(self):
         viewer_index = app_root() / "viewer" / "index.html"
         if not viewer_index.exists():
@@ -132,13 +212,26 @@ class SolveTab(QWidget):
 
     # ---------- world payload to viewer ----------
     def _send_world_to_viewer(self, data: dict):
-        """Emit the viewer payload via WebChannel."""
+        """Entry point used by world-follow/open; updates UI and applies reveal filter."""
+        # cache latest
+        self._last_world_data = data
+        # keep reveal UI in sync with this geometry
+        self._update_reveal_ui_from_data(data)
+        # compute how many to show
+        pieces_total = len(data.get("pieces") or [])
+        n = pieces_total if self.reveal_count < 0 else max(0, min(self.reveal_count, pieces_total))
+        filtered = self._filter_data_by_reveal(data, n)
+        # delegate to the actual emitter
+        self._really_send_to_viewer(filtered)
+
+    def _really_send_to_viewer(self, data: dict):
+        """Build the payload and emit to the web viewer (no filtering here)."""
         payload = {
             "version": data.get("version"),
             "run_id": data.get("run_id"),
             "r": data.get("r"),
             "bbox": data.get("bbox"),
-            "pieces": data.get("pieces", []),  # [{id, name, centers:[[x,y,z],...]}]
+            "pieces": data.get("pieces", []),  # [{id,name,centers/world_centers}]
             "container_name": data.get("container_name"),
             "lattice": data.get("lattice"),
             "space": data.get("space"),
@@ -147,12 +240,33 @@ class SolveTab(QWidget):
 
     # ---------- world file handling ----------
     def open_world_file(self, path: Path):
-        """User chose a world file; start following it and send once."""
+        """User chose a world file; start following and/or build timeline."""
         self._current_world_file = path
+        self.lblFile.setText(str(path))
+
+        # Always try an immediate read for labels/viewer (full mode)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            self.lblRun.setText(str(data.get("run_id", "—")))
+            self.lblContainer.setText(str(data.get("container_name", "—")))
+            total = 25
+            placed = sum(len(p.get("centers", [])) > 0 for p in data.get("pieces", []))
+            self.lblPlaced.setText(f"{placed} / {total}")
+            self._send_world_to_viewer(data)
+        except Exception:
+            pass
+
+        # World follow target (full mode uses this; build mode ignores it)
         self.world_path = Path(path)
         self._last_world_sig = None
-        self.lblFile.setText(str(path))
-        self._read_world_and_send()  # immediate first push
+
+        # Build timeline index now if Build mode is selected
+        if self._mode_is_build():
+            self._timeline_scan(select="last")
+            if self.timeline_frames:
+                self._load_frame_and_send(self.timeline_index)
+        else:
+            self._timeline_update_ui()
 
     def _clear_stats_world_only(self):
         self.lblRun.setText("—")
@@ -211,14 +325,22 @@ class SolveTab(QWidget):
 
     # ---------- progress polling (snapshot + jsonl tail) ----------
     def _poll_tick(self, force: bool = False):
-        # world file (follow if selected)
+        # World follow OR timeline extend
         try:
-            if self.world_path and self.world_path.exists():
-                stw = self.world_path.stat()
-                sigw = (int(stw.st_mtime_ns), int(stw.st_size))
-                if force or sigw != self._last_world_sig:
-                    self._last_world_sig = sigw
-                    self._read_world_and_send()
+            if self._mode_is_build():
+                # extend timeline list if new frames appear
+                if self._current_world_file and self.live_extend:
+                    prev_count = len(self.timeline_frames)
+                    self._timeline_scan(select="last")
+                    # do not auto-show here; playback tick/slider change drives display
+            else:
+                # Full mode: follow the selected world file live
+                if self.world_path and self.world_path.exists():
+                    stw = self.world_path.stat()
+                    sigw = (int(stw.st_mtime_ns), int(stw.st_size))
+                    if force or sigw != self._last_world_sig:
+                        self._last_world_sig = sigw
+                        self._read_world_and_send()  # safe read + push to viewer
         except Exception:
             pass
 
@@ -326,6 +448,188 @@ class SolveTab(QWidget):
         total = int(data.get("total", 25)) if isinstance(data.get("total"), (int, float)) else 25
         placed = sum(len(p.get("centers", [])) > 0 for p in data.get("pieces", []))
         self.lblPlaced.setText(f"{placed} / {total}")
-
-        # Push to viewer (already tolerant of centers/world_centers)
+        # Push to viewer
         self._send_world_to_viewer(data)
+
+    def _mode_is_build(self) -> bool:
+        try:
+            return self.cmbMode.currentData() == "build"
+        except Exception:
+            return False
+
+    def _timeline_scan(self, select: str = "last") -> None:
+        """Scan directory of the selected world file for snapshot frames; build ordered list."""
+        self.timeline_frames.clear()
+        self.timeline_index = -1
+        if not self._current_world_file:
+            self._timeline_update_ui()
+            return
+        folder = self._current_world_file.parent
+        chosen = self._current_world_file.name
+
+        # Determine prefix to match related frames
+        if ".current." in chosen:
+            prefix = chosen.split(".current.")[0]
+        else:
+            # strip ".world.json"
+            prefix = chosen[:-len(".world.json")] if chosen.endswith(".world.json") else chosen
+
+        # Collect *.world.json that share prefix, excluding ".current."
+        for f in folder.glob("*.world.json"):
+            n = f.name
+            if ".current." in n:
+                continue
+            if not n.startswith(prefix):
+                continue
+            self.timeline_frames.append(f)
+
+        # Sort by mtime, then name
+        self.timeline_frames.sort(key=lambda p: (p.stat().st_mtime_ns, p.name))
+
+        # Initialize index
+        if self.timeline_frames:
+            self.timeline_index = 0 if select == "first" else len(self.timeline_frames) - 1
+        self._timeline_update_ui()
+
+    def _timeline_update_ui(self) -> None:
+        count = len(self.timeline_frames)
+        self.slider.setEnabled(self._mode_is_build() and count > 0)
+        self.btnPlay.setEnabled(self._mode_is_build() and count > 1)
+        self.slider.blockSignals(True)
+        self.slider.setRange(0, max(0, count - 1))
+        self.slider.setValue(max(0, self.timeline_index) if count else 0)
+        self.slider.blockSignals(False)
+        self.lblFrame.setText(f"{self.timeline_index+1 if count else 0} / {count}")
+
+    def _load_frame_and_send(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self.timeline_frames):
+            return
+        p = self.timeline_frames[idx]
+        try:
+            txt = p.read_text(encoding="utf-8-sig", errors="ignore")
+            data = json.loads(txt)
+        except Exception:
+            return
+        # Update stats from frame
+        self.lblFile.setText(str(p))
+        self.lblRun.setText(str(data.get("run_id", "—")))
+        self.lblContainer.setText(str(data.get("container_name", "—")))
+        total = int(data.get("total", 25)) if isinstance(data.get("total"), (int, float)) else 25
+        placed = sum(len(piece.get("centers", [])) > 0 for piece in data.get("pieces", []))
+        self.lblPlaced.setText(f"{placed} / {total}")
+        # Push to viewer
+        self._send_world_to_viewer(data)
+
+    def _on_mode_changed(self) -> None:
+        is_build = self._mode_is_build()
+        # Stop playback
+        self.play_timer.stop()
+        self.btnPlay.setText("Play")
+        # In Build mode, scan timeline and show the last frame
+        if is_build:
+            self._timeline_scan(select="last")
+            if self.timeline_frames:
+                self._load_frame_and_send(self.timeline_index)
+        else:
+            # Full mode: revert file label to selected world file and allow live follow
+            if self._current_world_file:
+                self.lblFile.setText(str(self._current_world_file))
+            self._timeline_update_ui()
+
+    def _on_slider_changed(self, value: int) -> None:
+        if not self._mode_is_build():
+            return
+        self.timeline_index = int(value)
+        self._timeline_update_ui()
+        self._load_frame_and_send(self.timeline_index)
+
+    def _on_play_clicked(self) -> None:
+        if not self._mode_is_build() or len(self.timeline_frames) <= 1:
+            return
+        if self.play_timer.isActive():
+            self.play_timer.stop()
+            self.btnPlay.setText("Play")
+        else:
+            self.play_timer.start()
+            self.btnPlay.setText("Pause")
+
+    def _on_speed_changed(self, idx: int) -> None:
+        self.play_speed_ms = {0: 1200, 1: 600, 2: 300}.get(int(idx), 600)
+        self.play_timer.setInterval(self.play_speed_ms)
+
+    def _on_play_tick(self) -> None:
+        if not self._mode_is_build() or not self.timeline_frames:
+            self.play_timer.stop()
+        else:
+            # advance; if at end, either extend or loop
+            if self.timeline_index + 1 < len(self.timeline_frames):
+                self.timeline_index += 1
+            else:
+                # try extend
+                if self.live_extend:
+                    prev_count = len(self.timeline_frames)
+                    self._timeline_scan(select="last")
+                    if len(self.timeline_frames) == prev_count:
+                        # no new frames; loop from start
+                        self.timeline_index = 0
+                else:
+                    self.timeline_index = 0
+            self._timeline_update_ui()
+            self._load_frame_and_send(self.timeline_index)
+
+    def _piece_sort_key(self, p: dict, idx: int) -> tuple:
+        """Stable ordering: numeric id → id, string id → base-26 (A..Z, AA..), else by name then index."""
+        pid = p.get("id", None)
+        if isinstance(pid, int):
+            return (0, pid, idx)
+        if isinstance(pid, str):
+            s = pid.upper()
+            n = 0
+            for ch in s:
+                if "A" <= ch <= "Z":
+                    n = n * 26 + (ord(ch) - 64)
+                else:
+                    # non-letter: fall back to name
+                    return (2, p.get("name", ""), idx)
+            return (1, n, idx)
+        return (3, p.get("name", ""), idx)
+
+    def _update_reveal_ui_from_data(self, data: dict) -> None:
+        pieces = data.get("pieces") or []
+        total = len(pieces)
+        # default to full if unset
+        current = total if self.reveal_count < 0 else max(0, min(self.reveal_count, total))
+        self.revealSlider.blockSignals(True)
+        self.revealSlider.setEnabled(total > 0)
+        self.revealSlider.setRange(0, total)
+        self.revealSlider.setValue(current)
+        self.revealSlider.blockSignals(False)
+        self.lblReveal.setText(f"{current} / {total}")
+
+    def _filter_data_by_reveal(self, data: dict, n: int) -> dict:
+        """Return a shallow-copied data dict with only first n pieces by ordered key."""
+        if not isinstance(data, dict):
+            return data
+        pieces = list(data.get("pieces") or [])
+        total = len(pieces)
+        if n >= total or n < 0:
+            return data  # no filtering needed
+
+        # order by stable key
+        ordered_indices = sorted(range(total), key=lambda i: self._piece_sort_key(pieces[i], i))
+        keep_set = set(ordered_indices[:n])
+
+        # shallow copy with filtered pieces
+        out = dict(data)
+        out["pieces"] = [pieces[i] for i in range(total) if i in keep_set]
+        return out
+
+    def _on_reveal_slider(self, value: int) -> None:
+        """User moved the slider: re-send filtered current geometry."""
+        self.reveal_count = int(value)
+        if not self._last_world_data:
+            return
+        self.lblReveal.setText(f"{self.reveal_count} / {len(self._last_world_data.get('pieces') or [])}")
+        # Filter and push again
+        filtered = self._filter_data_by_reveal(self._last_world_data, self.reveal_count)
+        self._really_send_to_viewer(filtered)
