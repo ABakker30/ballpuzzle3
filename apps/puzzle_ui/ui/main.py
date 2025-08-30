@@ -1,4 +1,4 @@
-﻿# --- local package bootstrap (run directly OR as module) ---
+# --- local package bootstrap (run directly OR as module) ---
 import sys
 import re
 from pathlib import Path
@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
         self.proc: Optional[QProcess] = None
         self.process_running = False
         self.viewer_paused = False
+        self._tb_paused = False
 
         self._build_ui()
 
@@ -53,13 +54,13 @@ class MainWindow(QMainWindow):
         # Top bar
         top = QHBoxLayout()
         self.btnStart = QPushButton("Start")
-        self.btnPause = QPushButton("Pause viewer")
+        self.actPause = QPushButton("Pause viewer")
         self.btnStop  = QPushButton("Stop")
         self.btnRefreshTop = QPushButton("Refresh viewer")
         self.btnOpen = QPushButton("Open .current.world.json…")
         self.lblStatus = QLabel("Status: Idle"); self.lblStatus.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        for w in (self.btnStart, self.btnPause, self.btnStop, self.btnRefreshTop, self.btnOpen):
+        for w in (self.btnStart, self.actPause, self.btnStop, self.btnRefreshTop, self.btnOpen):
             top.addWidget(w)
         top.addStretch(1); top.addWidget(self.lblStatus)
 
@@ -83,7 +84,21 @@ class MainWindow(QMainWindow):
         self.btnOpen.clicked.connect(self._pick_world_file)
         self.btnStart.clicked.connect(self._start_solver)
         self.btnStop.clicked.connect(self._stop_solver)
-        self.btnPause.clicked.connect(self._toggle_viewer_pause)
+        self.actPause.clicked.connect(self._toggle_viewer_pause)
+
+        self.actStart = QPushButton("Start")
+        self.actStop = QPushButton("Stop")
+        self.actStart.clicked.connect(self._start_solver)
+        self.actStop.clicked.connect(self._stop_solver)
+
+        self.actStart.triggered.connect(self._tb_onStart)
+        self.actStop.triggered.connect(self._tb_onStop)
+
+        try:
+            self.actPause.triggered.disconnect()
+        except Exception:
+            pass
+        self.actPause.triggered.connect(self._tb_onPauseResume)
 
         self._update_buttons()
 
@@ -151,6 +166,7 @@ class MainWindow(QMainWindow):
             self.proc = None; return
 
         self.process_running = True
+        self._tb_onStart()
         self.lblStatus.setText("Status: Running")
         self._update_buttons()
 
@@ -163,17 +179,16 @@ class MainWindow(QMainWindow):
             self._append_status("Force-killing solver...")
             self.proc.kill(); self.proc.waitForFinished(2000)
         self.process_running = False
+        self._tb_onStop()
         self.lblStatus.setText("Status: Stopped")
         self._update_buttons()
 
     def _toggle_viewer_pause(self):
-        self.viewer_paused = not self.viewer_paused
-        self.btnPause.setText("Resume viewer" if self.viewer_paused else "Pause viewer")
-        self._append_status("Viewer paused" if self.viewer_paused else "Viewer resumed")
-        self.solve_tab.set_follow_enabled(not self.viewer_paused)
+        self._tb_onPauseResume()
 
     def _proc_finished(self, code: int, status):
         self.process_running = False
+        self._tb_onStop()
         self.lblStatus.setText(f"Status: Exited ({code})")
         self._update_buttons()
         self._append_status(f"Solver exited with code {code}")
@@ -204,7 +219,37 @@ class MainWindow(QMainWindow):
     def _update_buttons(self):
         self.btnStart.setEnabled(not self.process_running)
         self.btnStop.setEnabled(self.process_running)
-        self.btnPause.setEnabled(True)
+        self.actPause.setEnabled(self.process_running)
+
+    def _tb_onStart(self):
+        # a run has been requested; enable Pause, reset label
+        self._tb_paused = False
+        self.actPause.setText("Pause")
+        self.actPause.setEnabled(True)
+
+    def _tb_onStop(self):
+        # run ended; disable Pause and reset label
+        self._tb_paused = False
+        self.actPause.setText("Pause")
+        self.actPause.setEnabled(False)
+
+    def _tb_onPauseResume(self):
+        # Toggle paused flag, call existing solver pause/resume, flip label
+        if not self.actPause.isEnabled():
+            return
+        self._tb_paused = not self._tb_paused
+
+        # Call whichever pause hook you already have (no viewer calls here)
+        try:
+            if hasattr(self, "pause_solver"):
+                self.pause_solver(self._tb_paused)
+            elif hasattr(self, "solve_tab") and hasattr(self.solve_tab, "pause_solver"):
+                self.solve_tab.pause_solver(self._tb_paused)
+            # else: no-op (keeps UI consistent)
+        except Exception:
+            pass
+
+        self.actPause.setText("Resume" if self._tb_paused else "Pause")
 
 
 def main():
