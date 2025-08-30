@@ -1,27 +1,38 @@
 # solver.py — FCC tetra-spheres puzzle driver
-# rev 3.9 — fresh-engine-per-run, snapshots (atomic + retry, non-blocking), deterministic shuffle,
-#           opener rotation, stall windows, hole4 pruning (optional / conditional),
-#           layered ASCII/JSON outputs, and console progress echo.
+# rev 4.0 — adds cooperative run-control (pause/resume/stop via logs/runctl.json),
+#           retains: fresh-engine-per-run, snapshots (atomic + retry, non-blocking),
+#           deterministic shuffle, opener rotation, stall windows,
+#           hole4 pruning (optional / conditional), layered ASCII/JSON outputs,
+#           and console progress echo.
 
 from __future__ import annotations
-import argparse, json, os, time, hashlib, importlib.util, importlib.machinery
+import argparse
+import json
+import os
+import time
+import hashlib
+import importlib.util
+import importlib.machinery
 from collections import deque
 from typing import Dict, List, Tuple, Set
 
 # ---------- paths ----------
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONTAINER = os.path.join(ROOT, "containers", "Roof.json")
-PIECES_PATH       = os.path.join(ROOT, "pieces", "4sphere.orientations.py")
-ENGINE_PATH       = os.path.join(ROOT, "solver_engine.py")
+PIECES_PATH = os.path.join(ROOT, "pieces", "4sphere.orientations.py")
+ENGINE_PATH = os.path.join(ROOT, "solver_engine.py")
 
-RESULTS_DIR       = os.path.join(ROOT, "results")
-LOGS_DIR          = os.path.join(ROOT, "logs")
-PROGRESS_PATH     = os.path.join(LOGS_DIR, "progress.json")
-PROGRESS_STREAM   = os.path.join(LOGS_DIR, "progress.jsonl")
+RESULTS_DIR = os.path.join(ROOT, "results")
+LOGS_DIR = os.path.join(ROOT, "logs")
+PROGRESS_PATH = os.path.join(LOGS_DIR, "progress.json")
+PROGRESS_STREAM = os.path.join(LOGS_DIR, "progress.jsonl")
+RUNCTL_PATH = os.environ.get("RUNCTL_OVERRIDE") or os.path.join(LOGS_DIR, "runctl.json")
+
 
 def ensure_dir(p: str):
     if not os.path.isdir(p):
         os.makedirs(p, exist_ok=True)
+
 
 # ---------- IO helpers ----------
 def load_json(path: str):
@@ -40,10 +51,53 @@ def sha1_file(path: str) -> str:
 
 def load_py_module(path: str, name: str):
     loader = importlib.machinery.SourceFileLoader(name, path)
-    spec   = importlib.util.spec_from_loader(loader.name, loader)
-    mod    = importlib.util.module_from_spec(spec)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
+
+
+# ---------- run control (pause/resume/stop) ----------
+_runctl_cache_mtime = -1.0
+_runctl_state = "run"
+
+def _init_runctl():
+    """Create runctl.json if missing with state=run (idempotent)."""
+    ensure_dir(LOGS_DIR)
+    if not os.path.exists(RUNCTL_PATH):
+        try:
+            with open(RUNCTL_PATH, "w", encoding="utf-8") as f:
+                json.dump({"state": "run", "ts": time.time()}, f, ensure_ascii=False)
+        except Exception:
+            pass
+    print(f"[runctl] solver RUNCTL_PATH = {RUNCTL_PATH}", flush=True)
+
+def _read_runctl_state():
+    """Cheap poll: only re-read file if mtime changed. Returns 'run'|'pause'|'stop'."""
+    global _runctl_cache_mtime, _runctl_state
+    try:
+        m = os.path.getmtime(RUNCTL_PATH)
+    except Exception:
+        return _runctl_state
+    if m != _runctl_cache_mtime:
+        _runctl_cache_mtime = m
+        try:
+            with open(RUNCTL_PATH, "r", encoding="utf-8") as f:
+                s = json.load(f)
+            _runctl_state = str(s.get("state", "run")).lower()
+        except Exception:
+            _runctl_state = "run"
+    return _runctl_state
+
+def _emit_event_line(payload: dict):
+    """Append a single JSON line to progress.jsonl (best effort)."""
+    ensure_dir(LOGS_DIR)
+    try:
+        with open(PROGRESS_STREAM, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
 
 # ---------- pieces adapter ----------
 def _looks_like_variants_dict(obj) -> bool:
@@ -58,7 +112,7 @@ def _looks_like_variants_dict(obj) -> bool:
             return False
     return True
 
-def extract_pieces(pieces_mod) -> Dict[str, List[List[Tuple[int,int,int]]]]:
+def extract_pieces(pieces_mod) -> Dict[str, List[List[Tuple[int, int, int]]]]:
     """
     Accepts either:
       1) { 'A': [ [(i,j,k)x4], [(i,j,k)x4], ... ], 'B': [...], ... }
@@ -67,49 +121,51 @@ def extract_pieces(pieces_mod) -> Dict[str, List[List[Tuple[int,int,int]]]]:
     data = getattr(pieces_mod, "PIECES", None)
     if data is None:
         raise ValueError("pieces module must define PIECES")
-    out: Dict[str, List[List[Tuple[int,int,int]]]] = {}
+    out: Dict[str, List[List[Tuple[int, int, int]]]] = {}
     if _looks_like_variants_dict(data):
         for pid, variants in data.items():
-            out[pid] = [ [tuple(c) for c in v] for v in variants ]
+            out[pid] = [[tuple(c) for c in v] for v in variants]
         return out
     for key, cells in data.items():
         pid = key.split("__", 1)[0] if "__" in key else key
         out.setdefault(pid, []).append([tuple(c) for c in cells])
     return out
 
+
 # ---------- world presentation ----------
-def ijk_to_world(i:int, j:int, k:int, r:float) -> List[float]:
+def ijk_to_world(i: int, j: int, k: int, r: float) -> List[float]:
     # square-frame presentation
-    s = r * 2.0**0.5
+    s = r * 2.0 ** 0.5
     x = (j + k) * s
     y = (i + k) * s
     z = (i + j) * s
     return [x, y, z]
 
+
 # ---------- canonical CID+SID helpers (orientation + translation invariant) ----------
 def _rotations24():
     """Generate the 24 proper cubic rotations as signed permutations with det=+1."""
-    from itertools import permutations, product
-    perms = list(permutations((0,1,2)))  # 6
-    signs = [(1,1,1), (1,-1,-1), (-1,1,-1), (-1,-1,1)]  # product = +1
+    from itertools import permutations
+    perms = list(permutations((0, 1, 2)))  # 6
+    signs = [(1, 1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1)]  # product = +1
     rots = []
     for p in perms:
         for s in signs:
             rots.append((p, s))
     return rots  # each rot is (perm, signs)
 
-def _apply_rot(v: Tuple[int,int,int], rot) -> Tuple[int,int,int]:
+def _apply_rot(v: Tuple[int, int, int], rot) -> Tuple[int, int, int]:
     (p, s) = rot
     w = (v[p[0]], v[p[1]], v[p[2]])
-    return (s[0]*w[0], s[1]*w[1], s[2]*w[2])
+    return (s[0] * w[0], s[1] * w[1], s[2] * w[2])
 
-def _normalize_cells(cells: List[Tuple[int,int,int]]) -> List[Tuple[int,int,int]]:
-    mi = min(i for i,_,_ in cells)
-    mj = min(j for _,j,_ in cells)
-    mk = min(k for _,_,k in cells)
-    return sorted([(i-mi, j-mj, k-mk) for (i,j,k) in cells])
+def _normalize_cells(cells: List[Tuple[int, int, int]]) -> List[Tuple[int, int, int]]:
+    mi = min(i for i, _, _ in cells)
+    mj = min(j for _, j, _ in cells)
+    mk = min(k for _, _, k in cells)
+    return sorted([(i - mi, j - mj, k - mk) for (i, j, k) in cells])
 
-def _canonicalize_cells(cells: List[Tuple[int,int,int]]):
+def _canonicalize_cells(cells: List[Tuple[int, int, int]]):
     """Return (canon_cells, chosen_rot, delta) where canon_cells are sorted, delta is (mi,mj,mk)."""
     best_str = None
     best = None
@@ -117,12 +173,11 @@ def _canonicalize_cells(cells: List[Tuple[int,int,int]]):
     best_delta = None
     for rot in _rotations24():
         rot_cells = [_apply_rot(c, rot) for c in cells]
-        # compute delta (mins) for this rotation
-        mi = min(i for i,_,_ in rot_cells)
-        mj = min(j for _,j,_ in rot_cells)
-        mk = min(k for _,_,k in rot_cells)
-        norm = sorted([(i-mi, j-mj, k-mk) for (i,j,k) in rot_cells])
-        s = ";".join(f"{i},{j},{k}" for (i,j,k) in norm)
+        mi = min(i for i, _, _ in rot_cells)
+        mj = min(j for _, j, _ in rot_cells)
+        mk = min(k for _, _, k in rot_cells)
+        norm = sorted([(i - mi, j - mj, k - mk) for (i, j, k) in rot_cells])
+        s = ";".join(f"{i},{j},{k}" for (i, j, k) in norm)
         if best_str is None or s < best_str:
             best_str = s
             best = norm
@@ -133,18 +188,19 @@ def _canonicalize_cells(cells: List[Tuple[int,int,int]]):
 def _sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
-def _cells_to_piece_string(cells: List[Tuple[int,int,int]]) -> str:
+def _cells_to_piece_string(cells: List[Tuple[int, int, int]]) -> str:
     # i:j:k comma-separated 4-tuples
-    return ",".join(f"{i}:{j}:{k}" for (i,j,k) in cells)
+    return ",".join(f"{i}:{j}:{k}" for (i, j, k) in cells)
 
-def _transform_cells(cells: List[Tuple[int,int,int]], rot, delta: Tuple[int,int,int]) -> List[Tuple[int,int,int]]:
+def _transform_cells(cells: List[Tuple[int, int, int]], rot, delta: Tuple[int, int, int]) -> List[Tuple[int, int, int]]:
     """Apply chosen rotation and translation-normalization to given cells."""
     mi, mj, mk = delta
     out = []
     for c in cells:
         r = _apply_rot(c, rot)
-        out.append((r[0]-mi, r[1]-mj, r[2]-mk))
+        out.append((r[0] - mi, r[1] - mj, r[2] - mk))
     return sorted(out)
+
 
 # ---------- outputs ----------
 def write_world_layers(engine, path: str, meta: dict = None):
@@ -171,7 +227,7 @@ def write_world_json(engine, dst_path: str, container_path: str, container_name:
         "present": "square",
         "presentation": {
             "mode": "square",
-            "frame": { "R": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]], "t": [0.0,0.0,0.0] }
+            "frame": {"R": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], "t": [0.0, 0.0, 0.0]}
         },
         "r": r,
         "pieces_order": [pl["piece"] for pl in engine.placements],
@@ -187,7 +243,7 @@ def write_world_json(engine, dst_path: str, container_path: str, container_name:
     data["container_cid_sha256"] = container_cid_sha256
 
     # Build pieces section (original presentation) and collect canonicalized per-piece cells for SIDs
-    piece_to_cells_canon: Dict[str, List[Tuple[int,int,int]]] = {}
+    piece_to_cells_canon: Dict[str, List[Tuple[int, int, int]]] = {}
     for pl in engine.placements:
         cells_idx = pl["cells_idx"]
         cells_ijk = [list(idx2cell[i]) for i in cells_idx]
@@ -203,7 +259,6 @@ def write_world_json(engine, dst_path: str, container_path: str, container_name:
         piece_to_cells_canon[pl["piece"]] = cells_canon
 
     # --- SID.state (order-agnostic final arrangement) ---
-    # Serialize piece map with piece ids sorted; each piece's 4 cells sorted (already)
     state_parts = []
     for pid in sorted(piece_to_cells_canon.keys()):
         state_parts.append(f"{pid}=" + _cells_to_piece_string(piece_to_cells_canon[pid]))
@@ -222,6 +277,7 @@ def write_world_json(engine, dst_path: str, container_path: str, container_name:
 
     with open(dst_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
 
 # ---------- atomic snapshot helpers (Windows-safe) ----------
 def _atomic_replace(src, dst, retries=12, delay=0.1):
@@ -242,15 +298,19 @@ def _atomic_write(path: str, data: str):
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(data)
     if not _atomic_replace(tmp, path):
-        try: os.remove(tmp)
-        except Exception: pass
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
 
 def _atomic_write_world_json(path: str, engine, container_path: str, container_name: str, r: float):
     tmp = path + ".tmp"
     write_world_json(engine, tmp, container_path, container_name, r)
     if not _atomic_replace(tmp, path):
-        try: os.remove(tmp)
-        except Exception: pass
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
 
 def write_world_layers_str(engine, container_cid_sha256=None, sid_state_sha256=None, sid_route_sha256=None, timestamp=None):
     idx2cell = engine.idx2cell
@@ -262,7 +322,9 @@ def write_world_layers_str(engine, container_cid_sha256=None, sid_state_sha256=N
 
     all_uvws = []
     for (i, j, k) in idx2cell:
-        u = j + k; v = i + k; w = i + j
+        u = j + k
+        v = i + k
+        w = i + j
         all_uvws.append((u, v, w))
     if not all_uvws:
         # still include a minimal header if provided
@@ -279,13 +341,18 @@ def write_world_layers_str(engine, container_cid_sha256=None, sid_state_sha256=N
         header = "\n".join(header_lines + [""]) if len(header_lines) > 1 else ""
         return header + "[SOLUTION — world view (ALL layers)]\n(empty)\n"
 
-    u_min = min(u for (u,_,_) in all_uvws); u_max = max(u for (u,_,_) in all_uvws)
-    v_min = min(v for (_,v,_) in all_uvws); v_max = max(v for (_,v,_) in all_uvws)
-    w_min = min(w for (_,_,w) in all_uvws); w_max = max(w for (_,_,w) in all_uvws)
+    u_min = min(u for (u, _, _) in all_uvws)
+    u_max = max(u for (u, _, _) in all_uvws)
+    v_min = min(v for (_, v, _) in all_uvws)
+    v_max = max(v for (_, v, _) in all_uvws)
+    w_min = min(w for (_, _, w) in all_uvws)
+    w_max = max(w for (_, _, w) in all_uvws)
 
     layer_to_grid = {}
     for (i, j, k), pid in cell_to_piece.items():
-        u = j + k; v = i + k; w = i + j
+        u = j + k
+        v = i + k
+        w = i + j
         layer_to_grid.setdefault(w, {})[(u, v)] = pid
 
     lines = []
@@ -342,6 +409,7 @@ def write_snapshot_atomic(container_path, container_name, r, engine, results_dir
 
     txt_path = os.path.join(results_dir, f"{container_name}.current.world_layers.txt")
     _atomic_write(txt_path, txt)
+
 def safe_snapshot(args, engine):
     # Never let snapshotting interrupt the solve.
     try:
@@ -349,9 +417,12 @@ def safe_snapshot(args, engine):
     except Exception:
         pass
 
+
 # ---------- progress emitters ----------
 def make_emit_progress(tail_deque: deque):
+    ensure_dir(RESULTS_DIR)
     ensure_dir(LOGS_DIR)
+    _init_runctl()  # ensure control file exists
 
     def emit_progress_to_streams(payload: dict, tail: deque):
         # stream line
@@ -373,11 +444,11 @@ def make_emit_progress(tail_deque: deque):
         try:
             if payload.get("event") == "progress":
                 placed = payload.get("placed", 0)
-                best   = payload.get("best_depth", placed)
-                total  = payload.get("total", 25)
-                aps    = payload.get("attempts_per_sec", 0)
-                run    = payload.get("run", 0)
-                seed   = payload.get("seed", "")
+                best = payload.get("best_depth", placed)
+                total = payload.get("total", 25)
+                aps = payload.get("attempts_per_sec", 0)
+                run = payload.get("run", 0)
+                seed = payload.get("seed", "")
                 status = payload.get("status", "")
                 line = f"[run {run} seed={seed}] placed {placed}/{total} | best {best} | rate {aps}/s"
                 if status:
@@ -400,9 +471,10 @@ def make_emit_progress(tail_deque: deque):
             "attempts_per_sec": aps,
         }
         if placed_only:
-            payload = {"event":"progress","run":run_idx,"placed":cur,"best_depth":best}
+            payload = {"event": "progress", "run": run_idx, "placed": cur, "best_depth": best}
         emit_progress_to_streams(payload, tail_deque)
     return emit_progress
+
 
 # ---------- engine builder (fresh per attempt) ----------
 def build_engine(SolverEngine,
@@ -453,6 +525,7 @@ def build_engine(SolverEngine,
 
     return eng
 
+
 # ---------- empties%4 gate helper ----------
 def _empties_mod4_ok_now(engine) -> bool:
     """Return True if engine thinks current empty-region sizes are all %4==0.
@@ -461,6 +534,7 @@ def _empties_mod4_ok_now(engine) -> bool:
         return bool(engine._empties_mod4_ok(engine.occ_bits))
     except Exception:
         return True
+
 
 # ---------- runner (single attempt) ----------
 def run_once_with_engine(engine,
@@ -471,7 +545,7 @@ def run_once_with_engine(engine,
                          args):
     """
     Returns: (status, progressed_any)
-      status ∈ {"solved", "exhausted_root", "stalled_or_exhausted"}
+      status ∈ {"solved", "exhausted_root", "stalled_or_exhausted", "stopped_by_user"}
     """
     from time import monotonic
 
@@ -483,6 +557,9 @@ def run_once_with_engine(engine,
     # Snapshot cadence
     last_snap_t = monotonic()
     SNAP_IVL = args.snapshot_interval
+
+    # Cooperative run-control state
+    paused = False
 
     # hole4 conditional gate: start with hole4 OFF if requested
     deferred_hole4 = False
@@ -510,6 +587,34 @@ def run_once_with_engine(engine,
     last_improve_t = monotonic()
 
     while True:
+        # --- cooperative run control (check first) ---
+        ctl = _read_runctl_state()
+        if ctl == "stop":
+            _emit_event_line({"event": "stopped", "run": run_idx, "seed": seed_label, "ts": time.time()})
+            return "stopped_by_user", progressed_any
+
+        if ctl == "pause":
+            if not paused:
+                paused = True
+                _emit_event_line({"event": "paused", "run": run_idx, "seed": seed_label, "ts": time.time()})
+            # wait here until run or stop
+            while True:
+                time.sleep(0.05)
+                ctl2 = _read_runctl_state()
+                if ctl2 == "stop":
+                    _emit_event_line({"event": "stopped", "run": run_idx, "seed": seed_label, "ts": time.time()})
+                    return "stopped_by_user", progressed_any
+                if ctl2 == "run":
+                    paused = False
+                    _emit_event_line({"event": "resumed", "run": run_idx, "seed": seed_label, "ts": time.time()})
+                    # reset APS baseline so resumed interval is accurate
+                    prev_t = monotonic()
+                    prev_att = getattr(engine, "attempts", 0)
+                    last_log_t = prev_t
+                    break
+            continue  # skip work on the iteration we just resumed
+
+        # --- one search step ---
         progressed_step, solved = engine.step_once()
         if progressed_step:
             progressed_any = True
@@ -558,6 +663,7 @@ def run_once_with_engine(engine,
                 return "exhausted_root", progressed_any
             return "stalled_or_exhausted", progressed_any
 
+
 # ---------- CLI ----------
 def build_argparser():
     p = argparse.ArgumentParser(
@@ -577,55 +683,57 @@ def build_argparser():
     )
 
     p.add_argument("container", nargs="?", default=DEFAULT_CONTAINER,
-        help="Path to container JSON (default: containers/Roof.json)")
+                   help="Path to container JSON (default: containers/Roof.json)")
 
     p.add_argument("--rng-seed", type=int, default=None,
-        help="Set RNG seed (affects candidate/ori order & TT keys). Omit for default engine seed = 1337.")
+                   help="Set RNG seed (affects candidate/ori order & TT keys). Omit for default engine seed = 1337.")
 
     p.add_argument("--restart-on-stall", type=int, default=None, metavar="SECONDS",
-        help="Fallback stall window if depth-specific options are not provided.")
+                   help="Fallback stall window if depth-specific options are not provided.")
 
     p.add_argument("--max-results", type=int, default=1, metavar="N",
-        help="Write up to N distinct solutions (seed increments). Default: 1.")
+                   help="Write up to N distinct solutions (seed increments). Default: 1.")
 
-    p.add_argument("--shuffle-pieces", choices=["none","within-buckets","full"], default="none",
-        help="Shuffle piece order deterministically from RNG seed.")
+    p.add_argument("--shuffle-pieces", choices=["none", "within-buckets", "full"], default="none",
+                   help="Shuffle piece order deterministically from RNG seed.")
 
     p.add_argument("--stall-below-23", type=int, default=None, metavar="SECONDS",
-        help="Stall window when best depth < 23 (overrides --restart-on-stall).")
+                   help="Stall window when best depth < 23 (overrides --restart-on-stall).")
 
     p.add_argument("--stall-at-23", type=int, default=None, metavar="SECONDS",
-        help="Stall window when best depth >= 23 (overrides --restart-on-stall).")
+                   help="Stall window when best depth >= 23 (overrides --restart-on-stall).")
 
     p.add_argument("--stall-at-24", type=int, default=None, metavar="SECONDS",
-        help="Stall window when best depth >= 24 (overrides --restart-on-stall).")
+                   help="Stall window when best depth >= 24 (overrides --restart-on-stall).")
 
     p.add_argument("--check-thickness", action="store_true",
-        help="Debug: print counts of cells that have all 6 axial neighbors vs all 6 diagonal neighbors.")
+                   help="Debug: print counts of cells that have all 6 axial neighbors vs all 6 diagonal neighbors.")
 
     p.add_argument("--try-openers", type=int, default=6, metavar="N",
-        help="If a run exhausts at depth 0, rotate the opening piece up to N times before changing seed (default: 6).")
+                   help="If a run exhausts at depth 0, rotate the opening piece up to N times before changing seed (default: 6).")
 
     # Hole pruning (escape % as %% to avoid argparse formatting error)
     p.add_argument("--hole4", "--hole-mod4", action="store_true", dest="hole4",
-        help="Enable hole-detect pruning. Reject states where an empty region size %% 4 != 0.")
+                   help="Enable hole-detect pruning. Reject states where an empty region size %% 4 != 0.")
 
     p.add_argument("--hole4-conditional", action="store_true",
-        help="Only enable hole-detect once the current empties already satisfy size %% 4 == 0.")
+                   help="Only enable hole-detect once the current empties already satisfy size %% 4 == 0.")
 
     # Snapshots
     p.add_argument("--snapshot-interval", type=int, default=None, metavar="SECONDS",
-        help="Write rolling snapshots of current placements every N seconds to results/<Name>.current.world.json and .current.world_layers.txt")
+                   help="Write rolling snapshots of current placements every N seconds to results/<Name>.current.world.json and .current.world_layers.txt")
 
     p.add_argument("--snapshot-on-depth", action="store_true",
-        help="Also write a snapshot whenever best depth improves.")
+                   help="Also write a snapshot whenever best depth improves.")
 
     return p
+
 
 # ---------- driver ----------
 def main():
     ensure_dir(RESULTS_DIR)
     ensure_dir(LOGS_DIR)
+    _init_runctl()
 
     p = build_argparser()
     args = p.parse_args()
@@ -634,7 +742,7 @@ def main():
     container_path = args.container
     container = load_json(container_path)
     cells = [tuple(c) for c in container["cells"]]
-    valid_set: Set[Tuple[int,int,int]] = set(cells)
+    valid_set: Set[Tuple[int, int, int]] = set(cells)
     r = float(container.get("r", 0.5))
     container_name = os.path.splitext(os.path.basename(container_path))[0]
 
@@ -645,14 +753,16 @@ def main():
 
     if args.check_thickness:
         # quick structural diagnostic
-        axial = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]
-        diag6 = [(1,-1,0),(-1,1,0),(1,0,-1),(-1,0,1),(0,1,-1),(0,-1,1)]
+        axial = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+        diag6 = [(1, -1, 0), (-1, 1, 0), (1, 0, -1), (-1, 0, 1), (0, 1, -1), (0, -1, 1)]
         v = valid_set
         axial_full = 0
-        diag_full  = 0
-        for (i,j,k) in v:
-            if all((i+di,j+dj,k+dk) in v for (di,dj,dk) in axial): axial_full += 1
-            if all((i+di,j+dj,k+dk) in v for (di,dj,dk) in diag6): diag_full  += 1
+        diag_full = 0
+        for (i, j, k) in v:
+            if all((i + di, j + dj, k + dk) in v for (di, dj, dk) in axial):
+                axial_full += 1
+            if all((i + di, j + dj, k + dk) in v for (di, dj, dk) in diag6):
+                diag_full += 1
         print(f"[thickness] cells with all 6 axial neighbors: {axial_full}")
         print(f"[thickness] cells with all 6 diagonal (FCC) neighbors: {diag_full}")
 
@@ -676,12 +786,12 @@ def main():
 
     # output paths
     def base_paths():
-        world_json_path   = os.path.join(RESULTS_DIR, f"{container_name}.world.json")
+        world_json_path = os.path.join(RESULTS_DIR, f"{container_name}.world.json")
         world_layers_path = os.path.join(RESULTS_DIR, f"{container_name}.world_layers.txt")
         return world_json_path, world_layers_path
 
     def indexed_paths(k: int):
-        world_json_path   = os.path.join(RESULTS_DIR, f"{container_name}.result{k}.world.json")
+        world_json_path = os.path.join(RESULTS_DIR, f"{container_name}.result{k}.world.json")
         world_layers_path = os.path.join(RESULTS_DIR, f"{container_name}.result{k}.world_layers.txt")
         return world_json_path, world_layers_path
 
@@ -711,6 +821,7 @@ def main():
         tried = 0
         max_try_openers = max(0, int(args.try_openers))
         rotated_solved = False
+        status = None  # track last run status
 
         while tried <= max_try_openers:
             # fresh engine for this attempt
@@ -762,13 +873,13 @@ def main():
                 else:
                     break
             else:
-                # stalled mid-depth or exhausted after some depth
+                # stalled mid-depth / stopped_by_user / or exhausted after some depth
                 break
 
         # write a final progress event for this run
         def _write_final(status_label):
             payload = {
-                "event":"progress",
+                "event": "progress",
                 "run": run_idx,
                 "seed": seed_label,
                 "status": status_label,
@@ -786,6 +897,9 @@ def main():
         if rotated_solved:
             _write_final("solved")
         else:
+            if status == "stopped_by_user":
+                _write_final("stopped_by_user")
+                break  # stop the whole driver cleanly
             _write_final("stalled")
 
         run_idx += 1
@@ -793,6 +907,7 @@ def main():
             break
 
     return
+
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,7 @@
-﻿# --- local package bootstrap (run directly OR as module) ---
+# --- local package bootstrap (run directly OR as module) ---
 import sys
 import re
+import os, json, time
 from pathlib import Path
 
 # Precompiled regex for solver stdout lines like:
@@ -25,7 +26,7 @@ except Exception:  # ImportError or ValueError (no package)
 # ---------------------------------------------------------------------------
 
 from typing import Optional
-from PySide6.QtCore import Qt, QProcess
+from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QTimer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QTabWidget
@@ -42,18 +43,48 @@ class MainWindow(QMainWindow):
 
         self.proc: Optional[QProcess] = None
         self.process_running = False
-        self.viewer_paused = False
+        self.solver_paused = False
+        self._runctl_path: Optional[str] = None  # logs/runctl.json for the active run
+
+        self._world_watch_timer = QTimer(self)
+        self._world_watch_timer.setInterval(1000)  # 1s poll, cheap
+        self._world_watch_timer.timeout.connect(self._poll_world_json)
+        self._last_world_mtime = 0.0
+        self._world_path_cache = ""  # absolute path to *.current.world.json
 
         self._build_ui()
 
+    def _stop_solver(self):
+        """Cooperative stop (runctl='stop') + process teardown."""
+        if not (self.proc and self.process_running):
+            return
+        # tell the solver to stop at the next safe point
+        self._write_runctl("stop")
+        self._set_status("Stopping solver...")
+
+        # terminate the child; kill if needed
+        try:
+            self.proc.terminate()
+            if not self.proc.waitForFinished(5000):
+                self._set_status("Force-killing solver...")
+                self.proc.kill()
+                self.proc.waitForFinished(2000)
+        finally:
+            self.process_running = False
+            self.solver_paused = False
+            self.btnPause.setText("Pause")
+            self._set_status("Stopped")
+            self._update_buttons()
+
+    # ---------- UI build ----------
     def _build_ui(self):
         central = QWidget(self); self.setCentralWidget(central)
-        v = QVBoxLayout(central); v.setContentsMargins(8,8,8,8); v.setSpacing(8)
+        v = QVBoxLayout(central); v.setContentsMargins(8, 8, 8, 8); v.setSpacing(8)
 
         # Top bar
         top = QHBoxLayout()
         self.btnStart = QPushButton("Start")
-        self.btnPause = QPushButton("Pause viewer")
+        self.btnPause = QPushButton("Pause")      # solver-only Pause/Resume
         self.btnStop  = QPushButton("Stop")
         self.btnRefreshTop = QPushButton("Refresh viewer")
         self.btnOpen = QPushButton("Open .current.world.json…")
@@ -79,26 +110,15 @@ class MainWindow(QMainWindow):
         v.addLayout(top); v.addWidget(tabs, 1)
 
         # wiring
-        self.btnRefreshTop.clicked.connect(self.solve_tab.refresh_all)
+        self.btnRefreshTop.clicked.connect(self.solve_tab.refresh_all)  # callable slot is fine
         self.btnOpen.clicked.connect(self._pick_world_file)
         self.btnStart.clicked.connect(self._start_solver)
         self.btnStop.clicked.connect(self._stop_solver)
-        self.btnPause.clicked.connect(self._toggle_viewer_pause)
+        self.btnPause.clicked.connect(self._toggle_pause_resume)
 
         self._update_buttons()
 
-    # ---------- Actions ----------
-    def _pick_world_file(self):
-        start_dir = str((repo_root() / "samples").resolve())
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Open world JSON", start_dir,
-            "World JSON (*.current.world.json *.json);;All Files (*)",
-        )
-        if not file_path: return
-        from pathlib import Path as _P
-        self.solve_tab.open_world_file(_P(file_path))
-        self.lblStatus.setText("Status: File loaded")
-
+    # ---------- Start / Pause / Stop ----------
     def _start_solver(self):
         if self.process_running:
             return
@@ -122,7 +142,7 @@ class MainWindow(QMainWindow):
             argv[1] = str(_P(argv[1]).expanduser().resolve())   # container
 
         pretty = " ".join([win_quote(str(prog_abs))] + [win_quote(a) for a in argv])
-        self._append_status(f"Launching: {pretty}")
+        self._set_status(f"Launching: {pretty}")
 
         # logs dir for follower
         logs_val = vals.get("logs_dir")
@@ -131,8 +151,14 @@ class MainWindow(QMainWindow):
 
         # working dir = parent of script (wrapper or real solver)
         workdir = str(_P(argv[0]).parent)
+        self._runctl_path = self._compute_runctl_path(workdir)
+        # ensure solver is in run mode (init/create file)
+        self._write_runctl("run")
 
         self.proc = QProcess(self)
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("RUNCTL_OVERRIDE", self._runctl_path)  # this is <workdir>\logs\runctl.json
+        self.proc.setProcessEnvironment(env)
         self.proc.setWorkingDirectory(workdir)
         self.proc.readyReadStandardOutput.connect(lambda: self._drain_output("stdout"))
         self.proc.readyReadStandardError.connect(lambda: self._drain_output("stderr"))
@@ -151,60 +177,168 @@ class MainWindow(QMainWindow):
             self.proc = None; return
 
         self.process_running = True
-        self.lblStatus.setText("Status: Running")
+        self.solver_paused = False
+        self.btnPause.setText("Pause")
+        self._set_status("Running")
         self._update_buttons()
+        self._world_watch_timer.start()
 
     def _stop_solver(self):
         if not (self.proc and self.process_running):
             return
-        self._append_status("Stopping solver...")
+        self._set_status("Stopping solver...")
+        # cooperative stop for the new solver
+        self._write_runctl("stop")
+        # then normal process teardown
         self.proc.terminate()
         if not self.proc.waitForFinished(5000):
-            self._append_status("Force-killing solver...")
+            self._set_status("Force-killing solver...")
             self.proc.kill(); self.proc.waitForFinished(2000)
         self.process_running = False
-        self.lblStatus.setText("Status: Stopped")
+        self.solver_paused = False
+        self.btnPause.setText("Pause")
+        self._set_status("Stopped")
+        self._update_buttons()
+        self._world_watch_timer.stop()
+
+    def _toggle_pause_resume(self):
+        if not self.process_running:
+            return
+        want_pause = not self.solver_paused
+        ok = self._write_runctl("pause" if want_pause else "run")
+        if ok:
+            self.solver_paused = want_pause
+            self.btnPause.setText("Resume" if self.solver_paused else "Pause")
+            self._set_status("Paused puzzling" if self.solver_paused else "Resumed puzzling")
         self._update_buttons()
 
-    def _toggle_viewer_pause(self):
-        self.viewer_paused = not self.viewer_paused
-        self.btnPause.setText("Resume viewer" if self.viewer_paused else "Pause viewer")
-        self._append_status("Viewer paused" if self.viewer_paused else "Viewer resumed")
-        self.solve_tab.set_follow_enabled(not self.viewer_paused)
+    # ---------- Small helpers ----------
+    def _set_status(self, msg: str, transient_ms: int = 0):
+        try:
+            self.statusBar().showMessage(msg, transient_ms)
+        except Exception:
+            pass
+        self.lblStatus.setText(f"Status: {msg}")
 
+    def _compute_runctl_path(self, workdir: str) -> str:
+        # write runctl next to the solver script (workdir/logs/runctl.json)
+        self._runctl_path = os.path.join(workdir, "logs", "runctl.json")
+        # Optional: surface the path for debugging
+        self._set_status(f"UI runctl = {self._runctl_path}", 1200)
+        return self._runctl_path
+
+    def _write_runctl(self, state: str) -> bool:
+        """Write {"state": ...} to logs/runctl.json only if it changes."""
+        path = self._runctl_path or os.path.join(str(repo_root()), "logs", "runctl.json")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+
+            # Read current state (if any)
+            cur = None
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    cur = (json.load(f) or {}).get("state")
+            except Exception:
+                cur = None
+
+            if cur == state:
+                try: self.statusBar().showMessage(f"runctl unchanged ({state})", 800)
+                except Exception: pass
+                return True
+
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"state": str(state), "ts": time.time()}, f, ensure_ascii=False)
+            try: self.statusBar().showMessage(f"runctl → {state}", 1200)
+            except Exception: pass
+            return True
+        except Exception as e:
+            try: self.statusBar().showMessage(f"runctl write failed: {e}", 3000)
+            except Exception: pass
+            return False
+
+    def _pick_world_file(self):
+        start_dir = str((repo_root() / "samples").resolve())
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open world JSON", start_dir,
+            "World JSON (*.current.world.json *.world.json *.json);;All Files (*)",
+        )
+        if not file_path:
+            return
+        from pathlib import Path as _P
+        self.solve_tab.open_world_file(_P(file_path))
+        self._set_status("File loaded")
+
+    # ---------- Process I/O ----------
     def _proc_finished(self, code: int, status):
         self.process_running = False
-        self.lblStatus.setText(f"Status: Exited ({code})")
+        self.solver_paused = False
+        self.btnPause.setText("Pause")
+        self._set_status(f"Exited ({code})")
         self._update_buttons()
-        self._append_status(f"Solver exited with code {code}")
+        self._world_watch_timer.stop()
 
     def _drain_output(self, which: str):
-        if not self.proc: return
+        if not self.proc:
+            return
         stream = self.proc.readAllStandardOutput() if which == "stdout" else self.proc.readAllStandardError()
         text = bytes(stream).decode(errors="ignore")
         if text.strip():
             last = text.strip().splitlines()[-1]
-            self._append_status(last)
+            self._set_status(last)
             self._parse_and_apply_stdout(text)
 
     def _parse_and_apply_stdout(self, text: str):
-        for ln in text.splitlines()[::-1]:  # search most recent first
+        # Parse newest-to-oldest; stop on first match
+        for ln in text.splitlines()[::-1]:
             m = STDOUT_PROGRESS_RE.search(ln)
             if not m:
                 continue
-            self.solve_tab.lblRun.setText(m.group("run"))
-            self.solve_tab.lblPlaced.setText(f"{m.group('placed')} / {m.group('total')}")
-            self.solve_tab.lblBest.setText(m.group("best"))
-            self.solve_tab.lblRate.setText(m.group("rate"))
+            try:
+                self.solve_tab.lblRun.setText(m.group("run"))
+                self.solve_tab.lblPlaced.setText(f"{m.group('placed')} / {m.group('total')}")
+                self.solve_tab.lblBest.setText(m.group("best"))
+                self.solve_tab.lblRate.setText(m.group("rate"))
+            except Exception:
+                pass
             break
 
-    def _append_status(self, msg: str):
-        self.lblStatus.setText(f"Status: {msg}")
-
+    # ---------- Button states ----------
     def _update_buttons(self):
         self.btnStart.setEnabled(not self.process_running)
-        self.btnStop.setEnabled(self.process_running)
-        self.btnPause.setEnabled(True)
+        self.btnPause.setEnabled(self.process_running)
+        self.btnStop.setEnabled(self.process_running or self.solver_paused)
+        # Normalize Pause label when leaving running state
+        if not self.process_running and self.btnPause.text() != "Pause":
+            self.btnPause.setText("Pause")
+
+    def _poll_world_json(self):
+        p = self._current_world_path()
+        if not p or not os.path.isfile(p):
+            return
+        try:
+            mt = os.path.getmtime(p)
+        except Exception:
+            return
+        if p != self._world_path_cache:
+            # new file context
+            self._world_path_cache = p
+            self._last_world_mtime = 0.0
+        if mt > self._last_world_mtime:
+            self._last_world_mtime = mt
+            # Use the same path your Refresh viewer button/slot uses
+            try:
+                # reuse your existing refresh path to avoid refits
+                if hasattr(self.solve_tab, "refresh_all"):
+                    self.solve_tab.refresh_all()
+                else:
+                    # fallback to the top-bar button if wired there
+                    self.btnRefreshTop.click()
+            except Exception:
+                pass
+
+    def _current_world_path(self):
+        # implement logic to get the current world path
+        pass
 
 
 def main():

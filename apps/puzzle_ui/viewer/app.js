@@ -2,8 +2,11 @@
 import * as THREE from './libs/three/three.module.js';
 import { OrbitControls } from './libs/three/examples/jsm/controls/OrbitControls.js';
 
+// Define window.viewer very early
+window.viewer = window.viewer || {};
+
 const rootEl = document.getElementById('app');
-let renderer, scene, camera, controls;
+let renderer, camera, controls;
 let lastRunId = null;
 let lastBBoxKey = null;
 
@@ -27,7 +30,35 @@ function initThree() {
   renderer.setSize(rootEl.clientWidth, rootEl.clientHeight);
   rootEl.appendChild(renderer.domElement);
 
-  scene = new THREE.Scene();
+  const scene = new THREE.Scene();
+  window.scene = scene;  // expose to Qt-injected JS
+
+  (function(){
+    window.viewer = window.viewer || {};
+
+    function collectMeshes(){
+      const out = [];
+      if (scene) scene.traverse(o => { if (o && o.isMesh) out.push(o); });
+      out.sort((a,b) => {
+        const an=(a.name||"")+"", bn=(b.name||"")+"";
+        return an.localeCompare(bn) || (a.id-b.id);
+      });
+      return out;
+    }
+
+    window.viewer.getPieceCount = function(){
+      return collectMeshes().length | 0;
+    };
+
+    window.viewer.setRevealCount = function(n){
+      const arr = collectMeshes();
+      const t = Math.max(0, Math.min(arr.length, (n|0)));
+      for (let i=0; i<arr.length; i++) arr[i].visible = (i < t);
+      return arr.length | 0;
+    };
+
+    window.viewer.resetRevealOrder = function(){ return true; };
+  })();
 
   camera = new THREE.OrthographicCamera(-5, 5, 5, -5, -100, 100);
   camera.position.set(5, 5, 5);
@@ -41,19 +72,19 @@ function initThree() {
 
   // simple physically-plausible-ish light rig
   const hemi = new THREE.HemisphereLight(0xffffff, 0x111122, 0.35);
-  scene.add(hemi);
+  window.scene.add(hemi);
   const key = new THREE.DirectionalLight(0xffffff, 0.9);
   key.position.set(1.5, 2.0, 1.0);
-  scene.add(key);
+  window.scene.add(key);
   const fill = new THREE.DirectionalLight(0xffffff, 0.3);
   fill.position.set(-2.0, 1.0, 0.5);
-  scene.add(fill);
+  window.scene.add(fill);
   const rim = new THREE.DirectionalLight(0xffffff, 0.6);
   rim.position.set(-1.0, 1.5, -2.0);
-  scene.add(rim);
+  window.scene.add(rim);
 
   const axes = new THREE.AxesHelper(2.5);
-  scene.add(axes);
+  window.scene.add(axes);
 
   animate();
   window.addEventListener('resize', onResize);
@@ -74,7 +105,7 @@ function onResize() {
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
-  renderer.render(scene, camera);
+  renderer.render(window.scene, camera);
 }
 
 // ---------- helpers ----------
@@ -148,9 +179,9 @@ function fitOrthoToBbox(bbox) {
 
 function clearSceneMeshes() {
   const toRemove = [];
-  scene.traverse(o => { if (o.userData && o.userData.isPieceMesh) toRemove.push(o); });
+  window.scene.traverse(o => { if (o.userData && o.userData.isPieceMesh) toRemove.push(o); });
   toRemove.forEach(o => {
-    scene.remove(o);
+    window.scene.remove(o);
     if (o.geometry) o.geometry.dispose();
     if (o.material) o.material.dispose();
   });
@@ -205,9 +236,79 @@ function drawPayload(payload) {
       inst.setMatrixAt(i, tmp.matrix);
     }
     inst.instanceMatrix.needsUpdate = true;
-    scene.add(inst);
+    window.scene.add(inst);
   });
 }
+
+// ---- CH4: one-time pivot & orthographic fit (no refits on updates) ----
+window.viewer = window.viewer || {};
+(function () {
+  let _fitDone = false;
+
+  function _sceneBox() {
+    const box = new THREE.Box3();
+    let any = false;
+    scene.traverse(o => {
+      if (o && o.isMesh && o.geometry) { box.expandByObject(o); any = true; }
+    });
+    return any ? box : null;
+  }
+
+  function _centerAndFitOrtho(margin = 1.15) {
+    const box = _sceneBox();
+    if (!box) return false;
+
+    // center
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+
+    // shift camera so target = center without changing view direction
+    const oldTarget = controls.target.clone();
+    const delta = center.clone().sub(oldTarget);
+    controls.target.copy(center);
+    camera.position.add(delta);
+    controls.update();
+
+    // bounding sphere for stable fit regardless of orientation
+    const sphere = new THREE.Sphere();
+    box.getBoundingSphere(sphere);
+    const r = Math.max(sphere.radius, 1e-6); // avoid zero
+
+    // orthographic half-sizes at zoom=1
+    const halfW = Math.abs(camera.right - camera.left) * 0.5;
+    const halfH = Math.abs(camera.top - camera.bottom) * 0.5;
+
+    // choose zoom so sphere fits with margin in both dimensions
+    const z1 = halfW / (r * margin);
+    const z2 = halfH / (r * margin);
+    const zoom = Math.max(0.01, Math.min(z1, z2));
+
+    camera.zoom = zoom;
+    camera.updateProjectionMatrix();
+
+    return true;
+  }
+
+  // Public API
+  window.viewer.fitOnce = function (opts) {
+    if (_fitDone) return true;
+    // Try now; if geometry isn't ready yet, retry a few frames.
+    let tries = 0;
+    function attempt() {
+      tries++;
+      const ok = _centerAndFitOrtho((opts && opts.margin) || 1.15);
+      if (ok || tries > 30) { _fitDone = ok; return; }
+      requestAnimationFrame(attempt);
+    }
+    attempt();
+    return true;
+  };
+
+  window.viewer.resetFit = function () {
+    _fitDone = false;
+    return true;
+  };
+})();
 
 // ---------- WebChannel hookup ----------
 function setupWebChannel() {
