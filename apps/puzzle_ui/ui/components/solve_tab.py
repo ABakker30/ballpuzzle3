@@ -249,23 +249,23 @@ class SolveTab(QWidget):
             (self.layout() or QVBoxLayout(self)).addWidget(reveal_box)
 
         # Bond
-        bond_box = QGroupBox("Bond")
-        bond_layout = QHBoxLayout(bond_box)
-        self.sldBond = QSlider(Qt.Horizontal)
-        self.sldBond.setObjectName("sldBond")
-        self.sldBond.setRange(10, 500)
-        self.sldBond.setValue(150)
-        self.sldBond.valueChanged.connect(lambda v: self.web.page().runJavaScript(f"setBondRadius({v/100.0});"))
-        bond_layout.addWidget(self.sldBond, 1)
-        bond_layout.addWidget(QLabel("Bond:", bond_box))
-        bond_box.setMaximumHeight(90)
-        if not self._dock_reveal_under_viewer(bond_box):
-            (self.layout() or QVBoxLayout(self)).addWidget(bond_box)
+        # bond_box = QGroupBox("Bond")
+        # bond_layout = QHBoxLayout(bond_box)
+        # self.sldBond = QSlider(Qt.Horizontal)
+        # self.sldBond.setObjectName("sldBond")
+        # self.sldBond.setRange(10, 500)
+        # self.sldBond.setValue(150)
+        # self.sldBond.valueChanged.connect(lambda v: self.web.page().runJavaScript(f"setBondRadius({v/100.0});"))
+        # bond_layout.addWidget(self.sldBond, 1)
+        # bond_layout.addWidget(QLabel("Bond:", bond_box))
+        # bond_box.setMaximumHeight(90)
+        # if not self._dock_reveal_under_viewer(bond_box):
+        #     (self.layout() or QVBoxLayout(self)).addWidget(bond_box)
 
         # Wire slider -> viewer.setRevealCount(n); no camera refit
         self.sldReveal.valueChanged.connect(self._on_reveal_changed)
 
-        self.web.loadFinished.connect(lambda ok: self.web.page().runJavaScript(f"setBondRadius({self.sldBond.value()/100.0});"))
+        # self.web.loadFinished.connect(lambda ok: self.web.page().runJavaScript(f"setBondRadius({self.sldBond.value()/100.0});"))
 
     @Slot()
     def _poll_tick(self):
