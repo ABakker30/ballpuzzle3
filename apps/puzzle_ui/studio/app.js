@@ -1,6 +1,6 @@
 // ES-module imports from your Viewer libs
 import * as THREE from '../viewer/libs/three/three.module.js';
-import { OrbitControls } from '../viewer/libs/three/examples/jsm/controls/OrbitControls.js';
+import { OrbitControls }     from '../viewer/libs/three/examples/jsm/controls/OrbitControls.js';
 
 // Optional: expose THREE if other code reads window.THREE
 window.THREE = THREE;
@@ -105,6 +105,7 @@ function _createBondMesh(a,b,mat){
   mesh.quaternion.setFromUnitVectors(_UP_Y, dir.clone().normalize());
   mesh.scale.set(BOND_RADIUS, len, BOND_RADIUS);
   mesh.userData.isBond = true;
+  mesh.userData.baseLen = len;   // remember full length for grow-in
   return mesh;
 }
 
@@ -188,7 +189,7 @@ function init(){
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x111111);
 
-  camera = new THREE.OrthographicCamera(-5,5,5,-5,0.01,1000);
+  camera = new THREE.PerspectiveCamera(75, el.clientWidth / el.clientHeight, 0.01, 1000);
   camera.position.set(8,8,8);
 
   controls = new OrbitControls(camera, renderer.domElement);
@@ -209,16 +210,91 @@ function init(){
 function onResize(){
   const el = renderer.domElement.parentElement;
   renderer.setSize(el.clientWidth, el.clientHeight);
-  // keep ortho zoom; recompute frustum from aspect only
-  const aspect = el.clientWidth / el.clientHeight;
-  const v = 5; // base half-height
-  camera.left = -v*aspect; camera.right = v*aspect; camera.top = v; camera.bottom = -v;
+  camera.aspect = el.clientWidth / el.clientHeight;
   camera.updateProjectionMatrix();
 }
 
+let __anim = null;  // holds current animation or null
+
+function _pieceGroups() {
+  const root = scene.getObjectByName("DISPLAY_ROOT");
+  if (!root) return [];
+  // Only animate real pieces, not containers
+  return root.children.filter(g => g.isGroup && !g.userData?.isContainer);
+}
+
+function _minWorldZ(group) {
+  // find the minimum Z of the group's atom meshes in WORLD space
+  let minZ = Infinity;
+  const v = new THREE.Vector3();
+  group.traverse(o => {
+    if (o.isMesh && o.userData?.isAtom) {
+      o.getWorldPosition(v);
+      if (v.z < minZ) minZ = v.z;
+    }
+  });
+  return minZ;
+}
+
+// Drive one animation frame
+function _stepAssembleBottomUp() {
+  if (!__anim || __anim.kind !== 'bottomup') return;
+  const now = performance.now();
+  const elapsed = now - __anim.start;
+  const N = __anim.groups.length;
+  if (N === 0) { __anim = null; return; }
+
+  const slot = __anim.duration / N;        // per-piece time window
+  const grow = slot * 0.8;                  // 80% of slot is the fade/grow window
+
+  let allDone = true;
+  for (let i = 0; i < N; i++) {
+    const g = __anim.groups[i];
+    const t0 = slot * i;
+    const p  = Math.max(0, Math.min(1, (elapsed - t0) / Math.max(1, grow))); // 0..1
+
+    if (elapsed >= t0) {
+      if (!g.visible) g.visible = true;
+      // fade in + bond grow
+      g.traverse(o => {
+        if (o.isMesh) {
+          // fade material
+          o.material.transparent = true;
+          o.material.opacity = 0.1 + 0.9 * p;
+          // grow bonds along length
+          if (o.userData?.isBond && o.userData.baseLen != null) {
+            o.scale.y = Math.max(0.0001, o.userData.baseLen * p);
+          }
+        }
+      });
+    }
+    if (elapsed < t0 + slot) allDone = false;
+  }
+
+  if (elapsed >= __anim.duration) {
+    // finalize: fully visible, full bond lengths, disable transparency
+    __anim.groups.forEach(g => {
+      g.visible = true;
+      g.traverse(o => {
+        if (o.isMesh) {
+          o.material.opacity = 1.0;
+          o.material.transparent = false;
+          if (o.userData?.isBond && o.userData.baseLen != null) {
+            o.scale.y = o.userData.baseLen;
+          }
+        }
+      });
+    });
+    __anim = null;
+    setStatus("Studio: animation complete");
+  }
+}
+
+// Hook the stepper into your render loop
 function animate(){
   requestAnimationFrame(animate);
   controls.update();
+  _stepAssembleBottomUp();   // <-- add this line
   renderer.render(scene, camera);
 }
 
@@ -381,7 +457,7 @@ function recolorSceneInPlace() {
 }
 
 // ---- Public APIs called from Qt ----
-window.setColorStrategy = function(name){
+function setColorStrategy(name){
   if (!COLOR_STRATEGIES[name]) return;
   __colorStrategy = name;
   const root = scene.getObjectByName("DISPLAY_ROOT");
@@ -396,7 +472,7 @@ window.setColorStrategy = function(name){
   renderer.render(scene, camera);
 };
 
-window.studioLoadJson = function(jsonText){
+function studioLoadJson(jsonText){
   let obj = null;
   try { obj = JSON.parse(jsonText); } catch { setStatus("Studio: invalid JSON"); return; }
 
@@ -404,6 +480,55 @@ window.studioLoadJson = function(jsonText){
   const snap = normalizeSnapshot(obj);
   buildSceneFromSnapshot(snap);         // fresh build
 };
+
+// Start: assemble pieces from lowest Z to highest (duration in seconds)
+function studioPlayAssembleBottomUp(durationSec) {
+  const groups = _pieceGroups();
+  if (!groups.length) {
+    setStatus("Studio: no pieces to animate"); 
+    return;
+  }
+
+  // sort by min world Z (lowest first)
+  const sorted = groups
+    .map(g => ({ g, z: _minWorldZ(g) }))
+    .sort((a,b) => a.z - b.z)
+    .map(o => o.g);
+
+  // initialize: hide all, make materials transparent, collapse bonds
+  sorted.forEach(g => {
+    g.visible = false;
+    g.traverse(o => {
+      if (o.isMesh) {
+        o.material.transparent = true;
+        o.material.opacity = 0.0;
+        if (o.userData?.isBond && o.userData.baseLen != null) {
+          o.scale.y = 0.0001;
+        }
+      }
+    });
+  });
+
+  __anim = {
+    kind: 'bottomup',
+    start: performance.now(),
+    duration: Math.max(500, (Number(durationSec) || 10) * 1000),
+    groups: sorted
+  };
+  setStatus(`Studio: assembling bottom-up (${groups.length} pieces, ${Math.round(__anim.duration/1000)}s)`);
+};
+
+// Optional: stop
+function studioStopAnimation(){
+  __anim = null;
+  setStatus("Studio: animation stopped");
+};
+
+// expose public APIs (module-safe)
+window.setColorStrategy        = window.setColorStrategy        || setColorStrategy;
+window.setStudioBrightness     = window.setStudioBrightness     || setStudioBrightness;
+window.studioLoadJson          = window.studioLoadJson          || studioLoadJson;
+window.studioPlayAssembleBottomUp = window.studioPlayAssembleBottomUp || studioPlayAssembleBottomUp;
 
 // boot
 init();

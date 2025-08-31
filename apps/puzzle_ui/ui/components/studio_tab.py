@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QFileDialog, QSlider, QMessageBox
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QFileDialog, QSlider, QMessageBox, QInputDialog
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 import json
@@ -45,6 +45,10 @@ class StudioTab(QWidget):
         row.addSpacing(12)
         row.addWidget(self.btnSave, 0, Qt.AlignLeft)
 
+        self.btnAssemble = QPushButton("Assemble (Z →)…")
+        row.addSpacing(12)
+        row.addWidget(self.btnAssemble, 0, Qt.AlignLeft)
+
         row.addWidget(self.btnOpen, 0, Qt.AlignLeft)
         row.addWidget(QLabel("Colors:"))
         row.addWidget(self.cmbColors, 0, Qt.AlignLeft)
@@ -70,19 +74,22 @@ class StudioTab(QWidget):
         self.cmbColors.currentIndexChanged.connect(
             lambda _:
                 self.web.page().runJavaScript(
-                    f'(window.setColorStrategy ? setColorStrategy("{self.cmbColors.currentData()}") : undefined)'
+                    f'(window.setColorStrategy ? setColorStrategy("{self.cmbColors.currentData()}") : console.warn("Studio not ready"))'
                 )
         )
         self.sldBright.valueChanged.connect(
-            lambda v: self.web.page().runJavaScript(f'(window.setStudioBrightness ? setStudioBrightness({v}/100.0) : undefined)')
+            lambda v: self.web.page().runJavaScript(
+                f'(window.setStudioBrightness ? setStudioBrightness({v}/100.0) : console.warn("Studio not ready"))'
+            )
         )
         self.web.loadFinished.connect(
             lambda ok: self.web.page().runJavaScript(
-                f'(window.setColorStrategy ? setColorStrategy("{self.cmbColors.currentData()}") : undefined);'
-                f'(window.setStudioBrightness ? setStudioBrightness({self.sldBright.value()/100.0}) : undefined);'
+                f'(window.setColorStrategy ? setColorStrategy("{self.cmbColors.currentData()}") : console.warn("Studio not ready"));'
+                f'(window.setStudioBrightness ? setStudioBrightness({self.sldBright.value()/100.0}) : console.warn("Studio not ready"));'
             )
         )
         self.btnSave.clicked.connect(self._on_save_png)
+        self.btnAssemble.clicked.connect(self._on_assemble)
 
     def _on_open(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -97,9 +104,10 @@ class StudioTab(QWidget):
             print(f"[Studio] Failed to read file: {e}")
             return
 
-        # Pass raw text (Studio normalizes internally)
         payload = json.dumps(text)
-        self.web.page().runJavaScript(f'studioLoadJson({payload})')
+        self.web.page().runJavaScript(
+            f'(window.studioLoadJson ? studioLoadJson({payload}) : console.warn("Studio not ready"))'
+        )
 
     def _on_save_png(self):
         # Choose path
@@ -131,3 +139,14 @@ class StudioTab(QWidget):
 
         # Run JS and get the data URL back
         self.web.page().runJavaScript(js, _write_png)
+
+    def _on_assemble(self):
+        dur, ok = QInputDialog.getDouble(
+            self, "Bottom-Up Assemble", "Duration (seconds):",
+            10.0, 1.0, 300.0, 1  # default 10s, min 1, max 300, 1 decimal
+        )
+        if not ok:
+            return
+        self.web.page().runJavaScript(
+            f'(window.studioPlayAssembleBottomUp ? studioPlayAssembleBottomUp({dur}) : console.warn("Studio not ready"))'
+        )
