@@ -10,6 +10,41 @@ let renderer, camera, controls;
 let lastRunId = null;
 let lastBBoxKey = null;
 
+// Camera persistence lock (first-fit only)
+let __zoomLocked = false;
+let __savedOrthoZoom = null;
+let __savedPerspDist = null;
+
+function __saveZoom() {
+  if (typeof camera === "undefined" || !camera) return;
+  if (camera.isOrthographicCamera) {
+    __savedOrthoZoom = camera.zoom;
+  } else {
+    // distance from camera to current controls target (or origin fallback)
+    const tgt = (typeof controls !== "undefined" && controls) ? controls.target : new THREE.Vector3(0,0,0);
+    __savedPerspDist = camera.position.clone().sub(tgt).length();
+  }
+}
+
+function __restoreZoom() {
+  if (typeof camera === "undefined" || !camera) return;
+  if (camera.isOrthographicCamera) {
+    if (__savedOrthoZoom != null) {
+      camera.zoom = __savedOrthoZoom;
+      camera.updateProjectionMatrix();
+    }
+  } else if (typeof controls !== "undefined" && controls && __savedPerspDist != null) {
+    const dir = camera.position.clone().sub(controls.target).normalize();
+    camera.position.copy(dir.multiplyScalar(__savedPerspDist).add(controls.target));
+    // perspective projection doesn’t need updateProjectionMatrix for zoom restores
+  }
+}
+
+// Optional (nice-to-have): keep the saved zoom in sync with user actions:
+if (typeof controls !== "undefined" && controls) {
+  controls.addEventListener("change", __saveZoom);
+}
+
 const PALETTE = [
   '#FF6B6B', '#4D96FF', '#FFD166', '#06D6A0', '#9B5DE5',
   '#FF924C', '#00BBF9', '#F15BB5', '#43AA8B', '#EE964B',
@@ -163,6 +198,8 @@ function computeBbox(pieces, r) {
 }
 
 function fitOrthoToBbox(bbox) {
+  if (__zoomLocked) return;  // never refit after the first time
+
   const min = new THREE.Vector3().fromArray(bbox.min);
   const max = new THREE.Vector3().fromArray(bbox.max);
   const size = new THREE.Vector3().subVectors(max, min);
@@ -180,6 +217,8 @@ function fitOrthoToBbox(bbox) {
   camera.position.set(center.x + longest, center.y + longest, center.z + longest);
   camera.lookAt(center);
   camera.updateProjectionMatrix();
+  __saveZoom();     // capture the initial zoom
+  __zoomLocked = true;
 }
 
 function clearSceneMeshes() {
@@ -301,11 +340,55 @@ function drawPayload(payload) {
 
   clearSceneMeshes();
 
-  // Fit only on new run or bbox change (keeps user zoom/angle stable)
-  if (isNewRun || bboxKey !== lastBBoxKey) {
+  // Zoom persistence
+  let __zoomLocked = false;   // becomes true after the first successful fit
+  let __savedOrthoZoom = null;
+  let __savedPerspDist = null;
+
+  function __saveZoom() {
+    if (!camera) return;
+    if (camera.isOrthographicCamera) {
+      __savedOrthoZoom = camera.zoom;
+    } else {
+      // distance from camera to pivot/target
+      const tgt = controls?.target || new THREE.Vector3();
+      __savedPerspDist = camera.position.distanceTo(tgt);
+    }
+  }
+
+  function __restoreZoom() {
+    if (!camera) return;
+    if (camera.isOrthographicCamera && __savedOrthoZoom != null) {
+      camera.zoom = __savedOrthoZoom;
+      camera.updateProjectionMatrix();
+    } else if (__savedPerspDist != null && controls) {
+      const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
+      camera.position.copy(dir.multiplyScalar(__savedPerspDist).add(controls.target));
+      // no projection change needed for perspective
+    }
+  }
+
+  // Optional: keep the saved zoom in sync with the user’s wheel/dragging
+  controls?.addEventListener('change', () => __saveZoom());
+
+  // Guard your initial fit vs. later refreshes
+  if (!__zoomLocked) {
     fitOrthoToBbox(bbox);
-    lastRunId = payload?.run_id ?? lastRunId;
-    lastBBoxKey = bboxKey;
+    __saveZoom();     // capture the initial zoom
+    __zoomLocked = true;
+  } else {
+    // On refresh/reveal/watcher updates: do NOT refit or change zoom
+    __restoreZoom();  // keep user zoom exactly as it was
+  }
+
+  // Skip any later code that recomputes zoom/FOV
+  if (!__zoomLocked) {
+    // existing auto-zoom/FOV code (first time only)
+    __saveZoom();
+    __zoomLocked = true;
+  } else {
+    // later updates should NOT touch zoom/FOV
+    __restoreZoom();
   }
 
   // a bit smoother for nicer specular highlights (tune if perf dips)
@@ -409,8 +492,10 @@ window.viewer = window.viewer || {};
     const z2 = halfH / (r * margin);
     const zoom = Math.max(0.01, Math.min(z1, z2));
 
-    camera.zoom = zoom;
-    camera.updateProjectionMatrix();
+    if (!__zoomLocked) {
+      camera.zoom = zoom;
+      camera.updateProjectionMatrix();
+    }
 
     return true;
   }
@@ -418,7 +503,7 @@ window.viewer = window.viewer || {};
   // Public API
   window.viewer.fitOnce = function (opts) {
     if (_fitDone) return true;
-    // Try now; if geometry isn't ready yet, retry a few frames.
+    // Try now; if geometry isn’t ready yet, retry a few frames.
     let tries = 0;
     function attempt() {
       tries++;
