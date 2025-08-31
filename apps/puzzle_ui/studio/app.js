@@ -46,8 +46,51 @@ const COLOR_STRATEGIES={
 
 function makePieceMaterialFor(pieceKey, index, total){
   const fn = COLOR_STRATEGIES[__colorStrategy] || STRAT_golden_3band;
-  const col = fn(pieceKey, index, total||__PIECE_COUNT_DEFAULT);
+  const N = Math.max(total || 0, __PIECE_COUNT_DEFAULT);    // <-- ensure at least 25
+  const col = fn(pieceKey, index, N);
   return new THREE.MeshStandardMaterial({ color: col, metalness:0.2, roughness:0.45 });
+}
+
+// Vibrant one-off material for containers (stable by container key)
+function makeContainerMaterial(key) {
+  const seed = __hash32(String(key)) / 4294967296;      // 0..1 stable
+  const h = (seed + 0.08) % 1;                          // hue
+  const s = 0.78, l = 0.54;                             // vivid but not neon
+  const col = new THREE.Color().setHSL(h, s, l);
+  return new THREE.MeshStandardMaterial({
+    color: col,
+    metalness: 0.25,
+    roughness: 0.40,
+  });
+}
+
+// Helper function to convert cells to centers
+function cellsToCenters(cells, lattice) {
+  const out = [];
+  if (!Array.isArray(cells)) return out;
+
+  if ((lattice || "").toUpperCase() === "FCC") {
+    const S = Math.SQRT1_2; // = 1 / sqrt(2) ≈ 0.70710678
+    for (const c of cells) {
+      if (!Array.isArray(c) || c.length !== 3) continue;
+      const i = c[0], j = c[1], k = c[2];
+      // FCC integer → world (nearest-neighbor = 1)
+      out.push({
+        x: (j + k) * S,
+        y: (i + k) * S,
+        z: (i + j) * S
+      });
+    }
+    return out;
+  }
+
+  // Default (e.g., SC): identity mapping
+  for (const c of cells) {
+    if (Array.isArray(c) && c.length === 3) {
+      out.push({ x: c[0], y: c[1], z: c[2] });
+    }
+  }
+  return out;
 }
 
 // ---- Bonds helpers (neighbor-only) ----
@@ -100,10 +143,40 @@ function ensureDisplayRoot(){
   }
   return DISPLAY_ROOT;
 }
-function resetDisplayRoot(){
-  const root = ensureDisplayRoot();
-  for (let i=root.children.length-1; i>=0; i--) root.remove(root.children[i]);
+
+function resetDisplayRoot() {
+  // Remove the old root entirely (in case anything bypassed it previously)
+  if (DISPLAY_ROOT) {
+    // Optional: dispose old geometries to be tidy
+    DISPLAY_ROOT.traverse(o => {
+      if (o.isMesh) {
+        if (o.geometry) o.geometry.dispose?.();
+        // We keep materials — they’re lightweight and often shared
+      }
+    });
+    scene.remove(DISPLAY_ROOT);
+    DISPLAY_ROOT = null;
+  }
+  // Recreate an empty root
+  DISPLAY_ROOT = new THREE.Group();
+  DISPLAY_ROOT.name = "DISPLAY_ROOT";
+  scene.add(DISPLAY_ROOT);
 }
+
+let AMB_LIGHT = null, DIR_LIGHT = null;
+const __baseAmb = 0.6, __baseDir = 0.8;
+
+function applyBrightness(factor) {
+  const k = Math.max(0, Number(factor) || 0);
+  if (AMB_LIGHT) AMB_LIGHT.intensity = __baseAmb * k;
+  if (DIR_LIGHT) DIR_LIGHT.intensity = __baseDir * k;
+  if (renderer && camera) renderer.render(scene, camera);
+}
+
+// Exposed to PyQt
+window.setStudioBrightness = function(factor) {
+  applyBrightness(factor);
+};
 
 function init(){
   const el = document.getElementById('root');
@@ -122,8 +195,12 @@ function init(){
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
 
-  const amb = new THREE.AmbientLight(0xffffff, 0.6); scene.add(amb);
-  const dir = new THREE.DirectionalLight(0xffffff, 0.8); dir.position.set(10,12,8); scene.add(dir);
+  AMB_LIGHT = new THREE.AmbientLight(0xffffff, __baseAmb);
+  scene.add(AMB_LIGHT);
+
+  DIR_LIGHT = new THREE.DirectionalLight(0xffffff, __baseDir);
+  DIR_LIGHT.position.set(10,12,8);
+  scene.add(DIR_LIGHT);
 
   window.addEventListener('resize', onResize);
   animate();
@@ -149,63 +226,131 @@ function animate(){
 function setStatus(msg){ if (statusEl) statusEl.textContent = msg; }
 
 function normalizeSnapshot(anyObj){
-  // Accepts {pieces:[{id?,name?,centers:[{x,y,z} or [x,y,z]], material_key?]} ...}
-  // Also tolerates {world_centers} per piece.
-  if (!anyObj) return { pieces: [] };
-  if (Array.isArray(anyObj.pieces)){
+  // --- Known "pieces"-style payload (solution/partial) ---
+  if (anyObj && Array.isArray(anyObj.pieces)) {
     const pieces = anyObj.pieces.map((p, i) => {
       const id = p.id ?? p.name ?? `piece_${i+1}`;
       const centersRaw = p.centers ?? p.world_centers ?? [];
-      const centers = centersRaw.map(c => Array.isArray(c)
-        ? { x:c[0], y:c[1], z:c[2] }
-        : { x:c.x, y:c.y, z:c.z });
+      const centers = centersRaw.map(c => Array.isArray(c) ? { x:c[0], y:c[1], z:c[2] } : { x:c.x, y:c.y, z:c.z });
       return { id, centers, material_key: p.material_key ?? id };
     });
-    return { pieces, palette: anyObj.palette || {} };
+    return {
+      kind: "pieces",
+      radius: Number(anyObj.r) || 0.5,
+      pieces,
+      palette: anyObj.palette || {}
+    };
   }
-  // Fallback: if it's a container-like file (cells, etc.), you can add adapters here later.
-  return { pieces: [] };
+
+  // --- Container-style payload (no pieces, lattice + cells) ---
+  if (anyObj && Array.isArray(anyObj.cells)) {
+    const id = (anyObj.meta && anyObj.meta.name) ? String(anyObj.meta.name) : "container";
+    const centers = cellsToCenters(anyObj.cells, anyObj.lattice);
+    return {
+      kind: "container",
+      radius: Number(anyObj.r) || 0.5,
+      pieces: [{ id, centers, material_key: id }],
+      palette: { strategy: "muted" } // default; Studio recolor not applied to containers
+    };
+  }
+
+  // Fallback empty scene
+  return { kind: "empty", radius: 0.5, pieces: [], palette: {} };
 }
 
-function buildSceneFromSnapshot(snapshot){
-  resetDisplayRoot();
-  const root = ensureDisplayRoot();
+function buildSceneFromSnapshot(snapshot) {
+  resetDisplayRoot();                     // clears any previous display
+  const root = ensureDisplayRoot();       // fresh container
+
   const pieces = snapshot.pieces || [];
-  const total = pieces.length || __PIECE_COUNT_DEFAULT;
+  const isContainer = snapshot.kind === "container";
 
-  let min = new THREE.Vector3( Infinity, Infinity, Infinity);
-  let max = new THREE.Vector3(-Infinity,-Infinity,-Infinity);
+  for (const p of pieces) {
+    const total = pieces.length || __PIECE_COUNT_DEFAULT;
 
-  pieces.forEach((p, idx) => {
+    // For containers: force a single vibrant material; skip bonds
+    const mat = isContainer
+      ? makeContainerMaterial(p.material_key || p.id)    // <- colorful single material
+      : makePieceMaterialFor(p.material_key || p.id, 0, total);
+
+    const atomR = snapshot.radius || 0.5;
     const g = new THREE.Group();
     g.name = p.id;
-    const mat = makePieceMaterialFor(p.material_key || p.id, idx, total);
-    const atoms = [];
-    for (const c of p.centers){
-      const s = new THREE.Mesh(new THREE.SphereGeometry(0.5, 24, 16), mat);
-      s.userData.isAtom = true;
-      s.position.set(c.x, c.y, c.z);
-      g.add(s); atoms.push(s);
-      min.min(s.position); max.max(s.position);
-    }
-    addBondsForAtoms(g, atoms, mat);
-    root.add(g);
-  });
 
-  // one-time fit to bbox center; never auto-refit later
-  const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
-  if (!__zoomLocked){
-    controls.target.copy(center);
-    // set a sensible ortho extents from bbox
+    // mark containers so recolor skips them
+    if (isContainer) g.userData.isContainer = true;
+
+    // (optional) for pieces, keep a stable key for recolor:
+    if (!isContainer) g.userData.pieceKey = p.material_key || p.id;
+
+    const atoms = p.centers.map(c => {
+      const s = new THREE.Mesh(new THREE.SphereGeometry(atomR, 24, 16), mat);
+      s.position.set(c.x, c.y, c.z);
+      g.add(s);
+      return s;
+    });
+
+    if (!isContainer) {
+      addBondsForAtoms(g, atoms, mat);     // bonds ON for pieces
+    }
+
+    root.add(g);                            // <- must be root.add(g), NOT scene.add(g)
+  }
+
+  const bbox = new THREE.Box3().setFromObject(root);
+  const min = bbox.min;
+  const max = bbox.max;
+
+  const newCenter = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
+
+  if (!__zoomLocked) {
+    // First load: fit once, then lock zoom
+    controls.target.copy(newCenter);
+
     const ext = new THREE.Vector3().subVectors(max, min);
     const longest = Math.max(ext.x, ext.y, ext.z) * 0.6 + 6;
-    camera.position.set(center.x + longest, center.y + longest, center.z + longest);
-    camera.lookAt(center);
+    camera.position.set(newCenter.x + longest, newCenter.y + longest, newCenter.z + longest);
+    camera.lookAt(newCenter);
+
     __savedOrthoZoom = camera.zoom;
     __zoomLocked = true;
+  } else {
+    // Subsequent loads: move the pivot to the new center
+    // and translate the camera by the same delta to avoid any jump.
+    const oldTarget = controls.target.clone();
+    const delta = newCenter.clone().sub(oldTarget);
+    controls.target.copy(newCenter);
+    camera.position.add(delta);
   }
-  setStatus(`Studio: loaded ${pieces.length} piece(s)`);
+
+  // Recolor using the actual number of groups that were created (prevents repeats)
+  // Skip recolor for containers (they use one colorful material on purpose)
+  if (!isContainer) {
+    recolorSceneInPlace();
+  }
+
+  setStatus(`Studio: loaded ${isContainer ? pieces[0]?.centers?.length ?? 0 : pieces.length} ${isContainer ? "container cell(s)" : "piece(s)"}`);
   renderer.render(scene, camera);
+}
+
+// Recolor all piece groups in place (skip containers), using the actual group count
+function recolorSceneInPlace() {
+  const root = scene.getObjectByName("DISPLAY_ROOT");
+  if (!root) return;
+
+  // Only recolor non-container groups
+  const groups = root.children.filter(
+    (ch) => ch.isGroup && !ch.userData?.isContainer && ch.children.some(k => k.isMesh)
+  );
+  const N = groups.length || __PIECE_COUNT_DEFAULT;
+
+  groups.forEach((g, i) => {
+    const key = g.userData?.pieceKey || g.name || String(i);
+    const mat = makePieceMaterialFor(key, i, N);
+    g.traverse((o) => { if (o.isMesh) o.material = mat; });
+  });
+
+  renderer && camera && renderer.render(scene, camera);
 }
 
 // ---- Public APIs called from Qt ----
@@ -225,11 +370,12 @@ window.setColorStrategy = function(name){
 };
 
 window.studioLoadJson = function(jsonText){
-  let obj=null;
-  try { obj = JSON.parse(jsonText); }
-  catch(e){ setStatus("Studio: invalid JSON"); return; }
+  let obj = null;
+  try { obj = JSON.parse(jsonText); } catch { setStatus("Studio: invalid JSON"); return; }
+
+  resetDisplayRoot();                   // hard wipe previous display
   const snap = normalizeSnapshot(obj);
-  buildSceneFromSnapshot(snap);
+  buildSceneFromSnapshot(snap);         // fresh build
 };
 
 // boot

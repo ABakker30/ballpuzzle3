@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QFileDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QFileDialog, QSlider
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 import json
@@ -11,7 +11,7 @@ class StudioTab(QWidget):
         super().__init__(parent)
         self.setObjectName("StudioTab")
 
-        # --- Top controls row (Open + Color Strategy)
+        # --- Top controls row (Open + Color Strategy + Brightness)
         row = QHBoxLayout()
         self.btnOpen = QPushButton("Open file…")
         self.cmbColors = QComboBox()
@@ -33,9 +33,19 @@ class StudioTab(QWidget):
             self.cmbColors.addItem(label, key)
         self.cmbColors.setCurrentIndex(0)
 
+        # Brightness slider (10%..300%, default 100%)
+        self.sldBright = QSlider(Qt.Horizontal)
+        self.sldBright.setRange(10, 300)
+        self.sldBright.setValue(100)
+        self.sldBright.setSingleStep(1)
+        self.sldBright.setFixedWidth(160)
+
         row.addWidget(self.btnOpen, 0, Qt.AlignLeft)
         row.addWidget(QLabel("Colors:"))
         row.addWidget(self.cmbColors, 0, Qt.AlignLeft)
+        row.addSpacing(12)
+        row.addWidget(QLabel("Brightness:"))
+        row.addWidget(self.sldBright, 0, Qt.AlignLeft)
         row.addStretch(1)
 
         # --- Web view (isolated Studio viewer)
@@ -58,11 +68,14 @@ class StudioTab(QWidget):
                     f'(window.setColorStrategy ? setColorStrategy("{self.cmbColors.currentData()}") : undefined)'
                 )
         )
+        self.sldBright.valueChanged.connect(
+            lambda v: self.web.page().runJavaScript(f'(window.setStudioBrightness ? setStudioBrightness({v}/100.0) : undefined)')
+        )
         self.web.loadFinished.connect(
-            lambda ok:
-                self.web.page().runJavaScript(
-                    f'(window.setColorStrategy ? setColorStrategy("{self.cmbColors.currentData()}") : undefined)'
-                )
+            lambda ok: self.web.page().runJavaScript(
+                f'(window.setColorStrategy ? setColorStrategy("{self.cmbColors.currentData()}") : undefined);'
+                f'(window.setStudioBrightness ? setStudioBrightness({self.sldBright.value()/100.0}) : undefined);'
+            )
         )
 
     def _on_open(self):
