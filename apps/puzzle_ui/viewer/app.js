@@ -245,6 +245,23 @@ function drawPayload(payload) {
   });
 }
 
+// ===== Bonds: Step 1 (scaffold only; no rendering yet) =====
+const Bonds = {
+  radiusR: 0.25,      // fraction of sphere radius; NOT used yet
+  meshes: new Map(),  // reserved
+  data:   new Map(),  // reserved
+  baseGeom: null      // reserved
+};
+
+// Expose a global setter so the UI can send values; no side effects yet.
+window.setBondRadius = function (v) {
+  const x = Math.max(0.0, Math.min(Number(v) || 0.25, 0.60));
+  Bonds.radiusR = x;
+  // Debug only; remove later
+  if (typeof console !== "undefined") console.log("[Bonds] radiusR =", x);
+};
+// ===== End Bonds: Step 1 =====
+
 // ---- CH4: one-time pivot & orthographic fit (no refits on updates) ----
 window.viewer = window.viewer || {};
 (function () {
