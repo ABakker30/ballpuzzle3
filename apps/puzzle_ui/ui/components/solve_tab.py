@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, Signal, Slot, QUrl, QTimer, Qt, QFileSystemW
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QSizePolicy,
     QGroupBox, QGridLayout, QLabel, QPushButton, QMessageBox, QFormLayout,
-    QSlider
+    QSlider, QComboBox, QFileDialog
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
@@ -165,6 +165,33 @@ class SolveTab(QWidget):
         self.btnRefresh.clicked.connect(self.refresh_all)
         lbox.addWidget(self.btnRefresh)
 
+        # Colors (strategy) — below the other sliders
+        colors_box = QGroupBox("Colors")
+        colors_layout = QGridLayout(colors_box)
+
+        self.cmbColors = QComboBox(colors_box)
+        # Show nice names, store strategy keys as item data (stable)
+        options = [
+            ("Distinct HSL – Golden (3-band)", "golden-3band"),
+            ("Distinct HSL – Equal (3-band)",  "equal-3band"),
+            ("Distinct HSL – Equal (4-band)",  "equal-4band"),
+            ("Warm / Cool Alternating",        "warm-cool"),
+            ("High Contrast",                  "high-contrast"),
+            ("Pastel Distinct",                "pastel"),
+            ("Muted Distinct",                 "muted"),
+            ("Okabe–Ito (25)",                 "okabe-ito-25"),
+            ("Tableau-like (25)",              "tableau-25"),
+            ("Distinct (Seeded by Piece)",     "distinct-seeded"),
+        ]
+        for label, key in options:
+            self.cmbColors.addItem(label, key)
+        self.cmbColors.setCurrentIndex(0)  # default
+
+        colors_layout.addWidget(QLabel("Strategy:", colors_box), 0, 0)
+        colors_layout.addWidget(self.cmbColors,                     0, 1)
+
+        lbox.addWidget(colors_box)
+
         # Right: viewer
         self.web = QWebEngineView(self)
 
@@ -266,6 +293,22 @@ class SolveTab(QWidget):
         self.sldReveal.valueChanged.connect(self._on_reveal_changed)
 
         # self.web.loadFinished.connect(lambda ok: self.web.page().runJavaScript(f"setBondRadius({self.sldBond.value()/100.0});"))
+
+        # Apply on change
+        self.cmbColors.currentIndexChanged.connect(
+            lambda _:
+                self.web.page().runJavaScript(
+                    f'setColorStrategy("{self.cmbColors.currentData()}")'
+                )
+        )
+
+        # Also apply once after the web page loads (so dropdown state takes effect)
+        self.web.loadFinished.connect(
+            lambda ok:
+                self.web.page().runJavaScript(
+                    f'setColorStrategy("{self.cmbColors.currentData()}")'
+                )
+        )
 
     @Slot()
     def _poll_tick(self, force: bool = False):
