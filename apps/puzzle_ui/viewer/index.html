@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html>
   <head>
     <meta charset="utf-8"/>
@@ -10,6 +10,23 @@
   </head>
   <body>
     <div id="app"></div>
+
+    <!-- Color Strategy control -->
+    <div id="color-controls" style="position:fixed; top:10px; right:10px; background:rgba(0,0,0,0.4); padding:8px 10px; border-radius:8px; font:12px/1.1 sans-serif; color:#fff; z-index:9999;">
+      <label for="colorStrategy" style="margin-right:6px;">Colors</label>
+      <select id="colorStrategy" onchange="window.setColorStrategy && window.setColorStrategy(this.value)">
+        <option value="golden-3band" selected>Distinct HSL – Golden (3-band)</option>
+        <option value="equal-3band">Distinct HSL – Equal (3-band)</option>
+        <option value="equal-4band">Distinct HSL – Equal (4-band)</option>
+        <option value="warm-cool">Warm / Cool Alternating</option>
+        <option value="high-contrast">High Contrast</option>
+        <option value="pastel">Pastel Distinct</option>
+        <option value="muted">Muted Distinct</option>
+        <option value="okabe-ito-25">Okabe–Ito (extended 25)</option>
+        <option value="tableau-25">Tableau-like (25)</option>
+        <option value="distinct-seeded">Distinct (Seeded by Piece)</option>
+      </select>
+    </div>
 
     <!-- Qt WebChannel (bundled with Qt) -->
     <script src="qrc:///qtwebchannel/qwebchannel.js"></script>

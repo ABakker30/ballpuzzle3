@@ -45,13 +45,143 @@ if (typeof controls !== "undefined" && controls) {
   controls.addEventListener("change", __saveZoom);
 }
 
-const PALETTE = [
-  '#FF6B6B', '#4D96FF', '#FFD166', '#06D6A0', '#9B5DE5',
-  '#FF924C', '#00BBF9', '#F15BB5', '#43AA8B', '#EE964B',
-  '#577590', '#E63946', '#2A9D8F', '#E9C46A', '#F4A261',
-  '#8ECAE6', '#219EBC', '#3A86FF', '#8338EC', '#FB5607',
-  '#FFBE0B', '#7CB518', '#2EC4B6', '#B5179E', '#3F88C5'
+// ===== Distinct color strategies (25 pieces) =====
+let __colorStrategy = "golden-3band";  // default
+const __PIECE_COUNT_DEFAULT = 25;
+
+// Small helpers
+function __hash32(str) {
+  let h = 2166136261 >>> 0; // FNV-1a
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function __hslColor(h /*0..1*/, s, l) {
+  const c = new THREE.Color(); c.setHSL(((h%1)+1)%1, s, l); return c;
+}
+function __hexColor(hex) { return new THREE.Color(hex); }
+function __bandLight(idx, bands) { return bands[idx % bands.length]; }
+
+// Strategy implementations (return THREE.Color)
+// 1) HSL golden ratio hues with 3-band lightness
+function STRAT_golden_3band(key, idx, total) {
+  const seed = __hash32(String(key)) / 4294967296;         // 0..1
+  const h = (seed + idx * 0.61803398875) % 1;             // golden-step
+  const s = 0.72, L = [0.42, 0.55, 0.68];
+  return __hslColor(h, s, __bandLight(idx, L));
+}
+// 2) HSL equal spacing with 3 bands
+function STRAT_equal_3band(key, idx, total) {
+  const h = idx / total; const s = 0.72, L = [0.40, 0.56, 0.72];
+  return __hslColor(h, s, __bandLight(idx, L));
+}
+// 3) HSL equal spacing with 4 bands
+function STRAT_equal_4band(key, idx, total) {
+  const h = idx / total; const s = 0.70, L = [0.38, 0.50, 0.62, 0.74];
+  return __hslColor(h, s, __bandLight(idx, L));
+}
+// 4) Warm/Cool alternating bands
+function STRAT_warm_cool(key, idx, total) {
+  const warm = [0.02, 0.06, 0.10, 0.15, 0.08, 0.12, 0.18, 0.21, 0.25, 0.30, 0.35, 0.40];
+  const cool = [0.58, 0.62, 0.66, 0.70, 0.74, 0.78, 0.82, 0.86, 0.90, 0.94, 0.98, 0.54, 0.50];
+  const pool = (idx % 2 === 0) ? warm : cool;
+  const h = pool[Math.floor(idx / 2) % pool.length];
+  const s = 0.75, L = [0.46, 0.60, 0.72];
+  return __hslColor(h, s, __bandLight(idx, L));
+}
+// 5) High-contrast (strong saturation, alternating lightness)
+function STRAT_high_contrast(key, idx, total) {
+  const h = (idx / total + 0.03 * (idx%3)) % 1;
+  const s = 0.85, L = [0.38, 0.66];
+  return __hslColor(h, s, __bandLight(idx, L));
+}
+// 6) Pastel
+function STRAT_pastel(key, idx, total) {
+  const h = (idx / total + 0.11) % 1; const s = 0.50, L = [0.72, 0.78, 0.84];
+  return __hslColor(h, s, __bandLight(idx, L));
+}
+// 7) Muted
+function STRAT_muted(key, idx, total) {
+  const h = (idx / total + 0.17) % 1; const s = 0.45, L = [0.46, 0.56, 0.66];
+  return __hslColor(h, s, __bandLight(idx, L));
+}
+// 8) Okabe–Ito base extended to 25 by lightness bands
+const OKABE_ITO = [
+  "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"
 ];
+function STRAT_okabe_ito_25(key, idx, total) {
+  const base = OKABE_ITO[idx % OKABE_ITO.length];
+  // apply banded lightness tweaks
+  const L = [0.40, 0.52, 0.64];
+  const c = new THREE.Color(base);
+  const hsl = { h:0, s:0, l:0 }; c.getHSL(hsl);
+  const l = L[Math.floor(idx / OKABE_ITO.length) % L.length];
+  return __hslColor(hsl.h, Math.min(0.80, Math.max(0.35, hsl.s)), l);
+}
+// 9) Tableau-like base extended
+const TABLEAU20 = [
+  "#4E79A7","#F28E2B","#E15759","#76B7B2","#59A14F",
+  "#EDC948","#B07AA1","#FF9DA7","#9C755F","#BAB0AC",
+  "#1F77B4","#FF7F0E","#2CA02C","#D62728","#9467BD",
+  "#8C564B","#E377C2","#7F7F7F","#BCBD22","#17BECF"
+];
+function STRAT_tableau_25(key, idx, total) {
+  const base = TABLEAU20[idx % TABLEAU20.length];
+  const bands = [0.46, 0.58, 0.70];
+  const c = new THREE.Color(base);
+  const hsl = { h:0, s:0, l:0 }; c.getHSL(hsl);
+  const l = bands[Math.floor(idx / TABLEAU20.length) % bands.length];
+  return __hslColor(hsl.h, Math.min(0.85, Math.max(0.40, hsl.s)), l);
+}
+// 10) Distinct seeded (hash the piece key to scramble order)
+function STRAT_distinct_seeded(key, idx, total) {
+  const seed = __hash32(String(key)) / 4294967296;
+  const h = (idx / total + seed * 0.37) % 1; const s = 0.70, L = [0.44, 0.58, 0.72];
+  return __hslColor(h, s, __bandLight(idx + Math.floor(seed*1e6), L));
+}
+
+const COLOR_STRATEGIES = {
+  "golden-3band": STRAT_golden_3band,
+  "equal-3band": STRAT_equal_3band,
+  "equal-4band": STRAT_equal_4band,
+  "warm-cool": STRAT_warm_cool,
+  "high-contrast": STRAT_high_contrast,
+  "pastel": STRAT_pastel,
+  "muted": STRAT_muted,
+  "okabe-ito-25": STRAT_okabe_ito_25,
+  "tableau-25": STRAT_tableau_25,
+  "distinct-seeded": STRAT_distinct_seeded
+};
+
+// Material factory: same material per piece (bonds will match)
+function makePieceMaterialFor(pieceKey, index, total) {
+  const fn = COLOR_STRATEGIES[__colorStrategy] || STRAT_golden_3band;
+  const col = fn(pieceKey, index, total || __PIECE_COUNT_DEFAULT);
+  return new THREE.MeshStandardMaterial({ color: col, metalness: 0.2, roughness: 0.45 });
+}
+
+// Recolor everything already drawn, without changing camera
+function recolorSceneInPlace() {
+  // Prefer a known display root if you have one; otherwise use scene
+  const root = scene.getObjectByName("DISPLAY_ROOT") || scene;
+  const groups = root.children.filter(ch => ch.isGroup && ch.children.some(k => k.isMesh));
+  const N = groups.length || __PIECE_COUNT_DEFAULT;
+
+  groups.forEach((g, i) => {
+    const key = g.userData?.pieceKey || g.name || String(i);
+    const mat = makePieceMaterialFor(key, i, N);
+    g.traverse(o => { if (o.isMesh) o.material = mat; });
+  });
+
+  renderer && camera && renderer.render(scene, camera);
+}
+
+// Public API for the dropdown
+window.setColorStrategy = function(name) {
+  if (!COLOR_STRATEGIES[name]) return;
+  __colorStrategy = name;
+  // Try to recolor in place to avoid any camera changes
+  recolorSceneInPlace();
+};
 
 // ---------- init ----------
 function initThree() {
@@ -154,7 +284,7 @@ function letterId(str) {
   const s = String(str).toUpperCase();
   let n = 0;
   for (let i = 0; i < s.length; i++) n = n * 26 + (s.charCodeAt(i) - 64);
-  return (n - 1) % PALETTE.length;
+  return (n - 1) % 25; // Changed to 25
 }
 
 function normalizePieces(raw) {
@@ -396,16 +526,12 @@ function drawPayload(payload) {
 
   resetDisplayRoot();
 
-  pieces.forEach(piece => {
+  pieces.forEach((piece, pieceIndex) => {
     const centers = piece.centers || [];
     if (!centers.length) return;
-    const color = new THREE.Color(PALETTE[piece.id % PALETTE.length]);
-    const mat = new THREE.MeshStandardMaterial({
-      color,
-      metalness: 0.85,
-      roughness: 0.25
-      // envMapIntensity: 1.0  // leave for later if we add an env map
-    });
+    const pieceKey = piece.id ?? piece.name ?? String(pieceIndex);
+    const mat = makePieceMaterialFor(pieceKey, pieceIndex, pieces.length);   // ← distinct color per piece
+
     const inst = new THREE.InstancedMesh(sphereGeom, mat, centers.length);
     inst.userData.isPieceMesh = true;
 
@@ -427,6 +553,7 @@ function drawPayload(payload) {
     pieceGroup.add(inst);
     atomMeshes.forEach(mesh => pieceGroup.add(mesh));
     clearPieceDisplay(pieceGroup);      // Call the cleaner at the start of your piece draw/update function
+    pieceGroup.userData.pieceKey = pieceKey; // Save key for later recolor
     ensureDisplayRoot().add(pieceGroup);
     addBondsForAtoms(pieceGroup, atomMeshes, mat);
   });
