@@ -268,6 +268,11 @@ class SolveTab(QWidget):
         # self.web.loadFinished.connect(lambda ok: self.web.page().runJavaScript(f"setBondRadius({self.sldBond.value()/100.0});"))
 
     @Slot()
+    def _poll_tick(self, force: bool = False):
+        """Stub to satisfy file-watcher/timer callbacks."""
+        return
+
+    @Slot()
     def _poll_tick(self):
         """
         Timer/auto-follow poll tick.
@@ -279,20 +284,6 @@ class SolveTab(QWidget):
                 self.poll_once()
             except Exception:
                 pass
-
-    @Slot()
-    def _poll_tick(self):
-        """
-        Called by Qt via connectSlotsByName (expected slot).
-        Prevents 'Slot not found' errors.
-        """
-        if hasattr(self, "poll_once") and callable(self.poll_once):
-            try:
-                self.poll_once()
-            except Exception:
-                pass
-        else:
-            pass
 
     # ---------- world payload to viewer ----------
     def _send_world_to_viewer(self, data: dict):
@@ -637,7 +628,8 @@ class SolveTab(QWidget):
             total = 0
         self.sldReveal.setRange(0, total)
         self.sldReveal.setValue(total)
-        self.revealLabel.setText(f"{total} / {total}")
+        if hasattr(self, "revealLabel") and self.revealLabel is not None:
+            self.revealLabel.setText(f"{total} / {total}")
 
     def _on_reveal_changed(self, n):
         try:

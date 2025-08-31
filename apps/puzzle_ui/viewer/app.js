@@ -192,10 +192,44 @@ function clearSceneMeshes() {
   });
 }
 
+// Add a tiny cleaner that removes the previous display for a piece
+function clearPieceDisplay(container) {
+  const toRemove = [];
+  container.children.forEach(o => {
+    if (o.isMesh && (o.userData?.isAtom || o.userData?.isBond)) toRemove.push(o);
+  });
+  toRemove.forEach(o => {
+    container.remove(o);
+    // If bonds use per-bond CylinderGeometry, free it:
+    if (o.userData?.isBond && o.geometry) o.geometry.dispose();
+    // Do NOT dispose shared sphere geometries/materials if reused elsewhere.
+  });
+}
+
+// ---- Display root: everything we draw for the current state lives here ----
+let DISPLAY_ROOT;
+function ensureDisplayRoot() {
+  if (!DISPLAY_ROOT) {
+    DISPLAY_ROOT = new THREE.Group();
+    DISPLAY_ROOT.name = "DISPLAY_ROOT";
+    scene.add(DISPLAY_ROOT);
+  }
+  return DISPLAY_ROOT;
+}
+function resetDisplayRoot() {
+  const root = ensureDisplayRoot();
+  for (let i = root.children.length - 1; i >= 0; i--) {
+    const child = root.children[i];
+    root.remove(child);
+    // We’re using shared geometries for bonds; no per-mesh dispose needed here.
+  }
+}
+
 // ===== Bonds (fixed radius, neighbor-only) =====
 const BOND_RADIUS   = 0.12;   // tweak to taste (e.g. 0.08–0.18 world units)
 const BOND_SEGMENTS = 12;     // cylinder roundness
 const _UP_Y         = new THREE.Vector3(0, 1, 0);
+const SHARED_BOND_GEOMETRY = new THREE.CylinderGeometry(1, 1, 1, BOND_SEGMENTS, 1, false);
 
 // Make one cylinder between two LOCAL positions a,b, using the piece's material
 function _createBondMesh(a, b, radius, material) {
@@ -203,8 +237,7 @@ function _createBondMesh(a, b, radius, material) {
   const len = dir.length();
   if (len < 1e-9) return null;
 
-  const geom = new THREE.CylinderGeometry(1, 1, 1, BOND_SEGMENTS, 1, false);
-  const mesh = new THREE.Mesh(geom, material);
+  const mesh = new THREE.Mesh(SHARED_BOND_GEOMETRY, material);
 
   // midpoint
   mesh.position.copy(new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5));
@@ -278,6 +311,8 @@ function drawPayload(payload) {
   // a bit smoother for nicer specular highlights (tune if perf dips)
   const sphereGeom = new THREE.SphereGeometry(r, 24, 16);
 
+  resetDisplayRoot();
+
   pieces.forEach(piece => {
     const centers = piece.centers || [];
     if (!centers.length) return;
@@ -301,13 +336,15 @@ function drawPayload(payload) {
       inst.setMatrixAt(i, tmp.matrix);
       const atomMesh = new THREE.Mesh(sphereGeom, mat);
       atomMesh.position.set(c[0], c[1], c[2]);
+      atomMesh.userData.isAtom = true;  // Tag atoms when you create them
       atomMeshes.push(atomMesh);
     }
     inst.instanceMatrix.needsUpdate = true;
     const pieceGroup = new THREE.Group();
     pieceGroup.add(inst);
     atomMeshes.forEach(mesh => pieceGroup.add(mesh));
-    window.scene.add(pieceGroup);
+    clearPieceDisplay(pieceGroup);      // Call the cleaner at the start of your piece draw/update function
+    ensureDisplayRoot().add(pieceGroup);
     addBondsForAtoms(pieceGroup, atomMeshes, mat);
   });
 }
