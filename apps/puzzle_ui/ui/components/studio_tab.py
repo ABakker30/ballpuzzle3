@@ -1,10 +1,11 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QFileDialog, QSlider
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QLabel, QFileDialog, QSlider, QMessageBox
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 import json
 import os
+import base64
 
 class StudioTab(QWidget):
     def __init__(self, parent=None):
@@ -39,6 +40,10 @@ class StudioTab(QWidget):
         self.sldBright.setValue(100)
         self.sldBright.setSingleStep(1)
         self.sldBright.setFixedWidth(160)
+
+        self.btnSave = QPushButton("Save PNG…")
+        row.addSpacing(12)
+        row.addWidget(self.btnSave, 0, Qt.AlignLeft)
 
         row.addWidget(self.btnOpen, 0, Qt.AlignLeft)
         row.addWidget(QLabel("Colors:"))
@@ -77,6 +82,7 @@ class StudioTab(QWidget):
                 f'(window.setStudioBrightness ? setStudioBrightness({self.sldBright.value()/100.0}) : undefined);'
             )
         )
+        self.btnSave.clicked.connect(self._on_save_png)
 
     def _on_open(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -94,3 +100,34 @@ class StudioTab(QWidget):
         # Pass raw text (Studio normalizes internally)
         payload = json.dumps(text)
         self.web.page().runJavaScript(f'studioLoadJson({payload})')
+
+    def _on_save_png(self):
+        # Choose path
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save PNG", "studio.png", "PNG Image (*.png)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+
+        # Export scale (2x is a good default). You can make this user-configurable later.
+        scale = 2
+        js = f'(window.studioCapturePng ? studioCapturePng({scale}) : null)'
+
+        def _write_png(data_url):
+            if not data_url or not isinstance(data_url, str) or not data_url.startswith("data:image/png;base64,"):
+                QMessageBox.warning(self, "Export", "PNG capture failed.")
+                return
+            b64 = data_url.split(",", 1)[1]
+            try:
+                with open(path, "wb") as f:
+                    f.write(base64.b64decode(b64))
+            except Exception as e:
+                QMessageBox.critical(self, "Export", f"Failed to write file:\n{e}")
+                return
+            # Optional: small success toast
+            print(f"[Studio] PNG saved: {path}")
+
+        # Run JS and get the data URL back
+        self.web.page().runJavaScript(js, _write_png)

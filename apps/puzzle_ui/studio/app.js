@@ -222,6 +222,33 @@ function animate(){
   renderer.render(scene, camera);
 }
 
+// ---- PNG capture (export current view) ----
+window.studioCapturePng = function(scale = 2) {
+  if (!renderer || !scene || !camera) return null;
+
+  // Save current size/ratio
+  const oldSize = new THREE.Vector2();
+  renderer.getSize(oldSize);
+  const oldPR = renderer.getPixelRatio();
+
+  // Scale canvas uniformly (keeps aspect & projection)
+  const w = Math.max(1, Math.floor(oldSize.x * scale));
+  const h = Math.max(1, Math.floor(oldSize.y * scale));
+
+  renderer.setPixelRatio(1);
+  renderer.setSize(w, h, false);
+  renderer.render(scene, camera);
+
+  const dataURL = renderer.domElement.toDataURL("image/png");
+
+  // Restore renderer
+  renderer.setSize(oldSize.x, oldSize.y, false);
+  renderer.setPixelRatio(oldPR);
+  renderer.render(scene, camera);
+
+  return dataURL; // "data:image/png;base64,...."
+};
+
 // ---- Loading & normalization ----
 function setStatus(msg){ if (statusEl) statusEl.textContent = msg; }
 
