@@ -4,7 +4,15 @@
 import sys
 from pathlib import Path
 import os, time
-from PySide6.QtCore import QFileSystemWatcher, QTimer
+from PySide6.QtCore import QObject, Signal, Slot, QUrl, QTimer, Qt, QFileSystemWatcher
+from PySide6.QtWidgets import (
+    QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QSizePolicy,
+    QGroupBox, QGridLayout, QLabel, QPushButton, QMessageBox, QFormLayout,
+    QSlider
+)
+from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtWidgets import QVBoxLayout
 
 _pkg = __package__
 if _pkg in (None, "", "components"):
@@ -22,16 +30,6 @@ else:
 import json
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
-
-from PySide6.QtCore import Qt, QUrl, QTimer, QFileSystemWatcher, QObject, Signal
-from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QSizePolicy,
-    QGroupBox, QGridLayout, QLabel, QPushButton, QMessageBox, QFormLayout,
-    QSlider
-)
-from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWebChannel import QWebChannel
-
 
 class ViewerBridge(QObject):
     """Qt↔JS bridge. JS listens for `bridge.sendPayload`."""
@@ -76,12 +74,20 @@ class SolveTab(QWidget):
 
         self._camfit_done_for_path = False  # Track “first load” for current world
 
+        self.lblRun = QLabel("—")            # ← store on self and set default here
+
         self._build_ui()
         self._init_followers()
 
         self.set_logs_dir(self.logs_dir)
         self.refresh_all()
         self.lblFile.setText(str(self.results_dir / "hollowpyramid.current.world.json"))
+
+        # Optional: Add a poll timer if not already present
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(250)  # ms; adjust if your v1.3 uses a different cadence
+        self._poll_timer.timeout.connect(self._poll_tick)
+        self._poll_timer.start()
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -105,26 +111,39 @@ class SolveTab(QWidget):
 
         # Progress stats
         stats = QGroupBox("Progress (auto-follow)", left)
-        sgrid = QGridLayout(stats)
+        sgrid = QFormLayout(stats)
         self.lblFile = QLabel("—", stats)
-        self.lblRun = QLabel("—", stats)
+        run_label = QLabel("Run:", stats)
+        self.lblRun = QLabel("—", stats)            # ← store on self and set default here
         self.lblContainer = QLabel("—", stats)
         self.lblPlaced = QLabel("— / —", stats)
         self.lblBest = QLabel("—", stats)
         self.lblAttempts = QLabel("—", stats)
         self.lblRate = QLabel("—", stats)
         rows = [
-            ("World file:", self.lblFile),
-            ("Run:", self.lblRun),
-            ("Container:", self.lblContainer),
-            ("Placed / Total:", self.lblPlaced),
-            ("Best depth:", self.lblBest),
-            ("Attempts:", self.lblAttempts),
-            ("Attempts/sec:", self.lblRate),
+            (QLabel("World file:"), self.lblFile),
+            (QLabel("Run:"), self.lblRun),
+            (QLabel("Container:"), self.lblContainer),
+            (QLabel("Placed / Total:"), self.lblPlaced, QLabel("—", stats)),
+            (QLabel("Best depth:"), self.lblBest),
+            (QLabel("Attempts:"), self.lblAttempts),
+            (QLabel("Attempts/sec:"), self.lblRate),
         ]
-        for i, (lab, w) in enumerate(rows):
-            sgrid.addWidget(QLabel(lab, stats), i, 0)
-            sgrid.addWidget(w, i, 1)
+        for row in rows:
+            if len(row) == 2:
+                lab, w = row
+                sgrid.addRow(lab, w)
+            elif len(row) == 3:
+                lab, w1, w2 = row
+                holder = QWidget(stats)
+                hb = QHBoxLayout(holder)
+                hb.setContentsMargins(0, 0, 0, 0)
+                hb.setSpacing(6)
+                hb.addWidget(w1)
+                hb.addWidget(w2)
+                sgrid.addRow(lab, holder)
+            else:
+                continue  # skip bad rows
         lbox.addWidget(stats, 0)
 
         # Totals (all runs)
@@ -155,6 +174,29 @@ class SolveTab(QWidget):
         self.channel.registerObject("bridge", self.bridge)
         self.web.page().setWebChannel(self.channel)
 
+        # --- BEGIN: safety shim for _load_viewer_index ---
+        if not hasattr(self, "_load_viewer_index"):
+            def __load_viewer_index_impl(_self):
+                layout = _self.layout()
+                if layout is None:
+                    layout = QVBoxLayout(_self)
+                    layout.setContentsMargins(6, 6, 6, 6)
+                    layout.setSpacing(6)
+                    _self.setLayout(layout)
+
+                if not hasattr(_self, "web") or _self.web is None:
+                    _self.web = _self.findChild(QWebEngineView, "viewer")
+                    if _self.web is None:
+                        _self.web = QWebEngineView(_self)
+                        _self.web.setObjectName("viewer")
+                        layout.addWidget(_self.web, 1)
+
+                html = Path(__file__).resolve().parents[2] / "viewer" / "index.html"
+                _self.web.load(QUrl.fromLocalFile(str(html)))
+
+            self._load_viewer_index = __load_viewer_index_impl.__get__(self, type(self))
+        # --- END: safety shim ---
+
         self._load_viewer_index()
 
         # Initialize slider after the viewer page is ready and on refresh
@@ -181,26 +223,60 @@ class SolveTab(QWidget):
         # Reveal (current geometry)
         reveal_box = QGroupBox("Reveal (current geometry)")
         _reveal_layout = QHBoxLayout(reveal_box)
-        self.revealSlider = QSlider(Qt.Horizontal)
-        self.revealSlider.setRange(0, 0)   # will set after we query viewer
-        self.revealLabel  = QLabel("0 / 0")
-        self.revealLabel.setMinimumWidth(64)
-        self.revealLabel.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        _reveal_layout.addWidget(self.revealSlider, 1)
-        _reveal_layout.addWidget(self.revealLabel, 0)
+        self.sldReveal = QSlider(Qt.Horizontal)
+        self.sldReveal.setObjectName("sldReveal")
+        self.sldBright = QSlider(Qt.Horizontal)
+        self.sldBright.setObjectName("sldBright")
+        self.sldBright.setRange(10, 500)
+        self.sldBright.setValue(150)
+        self.sldBright.valueChanged.connect(self.on_brightness_changed)
+
+        reveal_bright_row = QWidget(self)
+        hb = QHBoxLayout(reveal_bright_row)
+        hb.setContentsMargins(0, 0, 0, 0)
+        hb.setSpacing(8)
+
+        hb.addWidget(self.sldReveal, 1)
+        hb.addWidget(QLabel("Brightness:", reveal_bright_row))
+        hb.addWidget(self.sldBright, 1)
+
+        _reveal_layout.addWidget(self.sldReveal, 1)
+        _reveal_layout.addWidget(QLabel("Brightness:", reveal_box))
+        _reveal_layout.addWidget(self.sldBright, 1)
 
         reveal_box.setMaximumHeight(90)
         if not self._dock_reveal_under_viewer(reveal_box):
             (self.layout() or QVBoxLayout(self)).addWidget(reveal_box)
 
         # Wire slider -> viewer.setRevealCount(n); no camera refit
-        self.revealSlider.valueChanged.connect(self._on_reveal_changed)
+        self.sldReveal.valueChanged.connect(self._on_reveal_changed)
 
-    def _load_viewer_index(self):
-        viewer_index = app_root() / "viewer" / "index.html"
-        if not viewer_index.exists():
-            QMessageBox.critical(self, "Missing viewer", f"Viewer file not found:\n{viewer_index}")
-        self.web.setUrl(QUrl.fromLocalFile(str(viewer_index)))
+    @Slot()
+    def _poll_tick(self):
+        """
+        Timer/auto-follow poll tick.
+        Some builds expect this slot to exist (connected by name).
+        Keep it lightweight; forward to an existing poll method if present.
+        """
+        if hasattr(self, "poll_once") and callable(getattr(self, "poll_once")):
+            try:
+                self.poll_once()
+            except Exception:
+                pass
+
+    @Slot()
+    def _poll_tick(self):
+        """
+        Called by Qt via connectSlotsByName (expected slot).
+        Prevents 'Slot not found' errors.
+        """
+        if hasattr(self, "poll_once") and callable(self.poll_once):
+            try:
+                self.poll_once()
+            except Exception:
+                pass
+        else:
+            pass
 
     # ---------- world payload to viewer ----------
     def _send_world_to_viewer(self, data: dict):
@@ -228,7 +304,7 @@ class SolveTab(QWidget):
             self._clear_stats_world_only()
             return
 
-        self.lblRun.setText(str(data.get("run_id", "—")))
+        self._update_run_label(data)
         self.lblContainer.setText(str(data.get("container_name", "—")))
         total = 25
         placed = sum(len(p.get("centers", [])) > 0 for p in data.get("pieces", []))
@@ -250,7 +326,7 @@ class SolveTab(QWidget):
             self._camfit_done_for_path = True
 
     def _clear_stats_world_only(self):
-        self.lblRun.setText("—")
+        self._update_run_label({})
         self.lblContainer.setText("—")
         self.lblPlaced.setText("— / —")
 
@@ -379,9 +455,7 @@ class SolveTab(QWidget):
             self._apply_progress_obj(last_obj)
 
     def _apply_progress_obj(self, data: Dict[str, Any]):
-        rid = data.get("run_id") or (str(data.get("run")) if data.get("run") is not None else None)
-        if rid is not None:
-            self.lblRun.setText(str(rid))
+        self._update_run_label(data)
 
         placed = data.get("placed")
         total = data.get("total", 25)
@@ -545,8 +619,8 @@ class SolveTab(QWidget):
             total = int(total) if total is not None else 0
         except Exception:
             total = 0
-        self.revealSlider.setRange(0, total)
-        self.revealSlider.setValue(total)
+        self.sldReveal.setRange(0, total)
+        self.sldReveal.setValue(total)
         self.revealLabel.setText(f"{total} / {total}")
 
     def _on_reveal_changed(self, n):
@@ -660,3 +734,50 @@ class SolveTab(QWidget):
         except Exception:
             # Don't let a failed parse kill the loop; try again on next change
             pass
+
+    def _update_run_label(self, payload: dict):
+        run = payload.get("run") or payload.get("run_id")
+        if isinstance(run, (int, float)) or (isinstance(run, str) and run.isdigit()):
+            self._last_run_id = int(run)
+        if getattr(self, "_last_run_id", None) is not None and hasattr(self, "lblRun"):
+            self.lblRun.setText(str(self._last_run_id))
+
+    def reset_progress_ui(self):
+        self._last_run_id = None
+        if hasattr(self, "lblRun"):
+            self.lblRun.setText("—")
+        # ... existing clears for other fields ...
+
+    def on_brightness_changed(self, val: int):
+        brightness = val / 100.0
+        self.web.page().runJavaScript(f"setBrightness({brightness});")
+
+    def _send_js(self, code: str):
+        view = getattr(self.parent(), "webview", None) or getattr(self.parent(), "web", None) \
+               or getattr(self.parent(), "viewer", None)
+        if view is None:
+            return
+        page = view.page() if hasattr(view, "page") else None
+        if page:
+            page.runJavaScript(code)
+
+    def _load_viewer_index(self):
+        """
+        Load apps/puzzle_ui/viewer/index.html into a single QWebEngineView.
+        """
+        layout = self.layout()
+        if layout is None:
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setSpacing(6)
+            self.setLayout(layout)
+
+        if not hasattr(self, "web") or self.web is None:
+            self.web = self.findChild(QWebEngineView, "viewer")
+            if self.web is None:
+                self.web = QWebEngineView(self)
+                self.web.setObjectName("viewer")
+                layout.addWidget(self.web, 1)
+
+        html = Path(__file__).resolve().parents[2] / "viewer" / "index.html"
+        self.web.load(QUrl.fromLocalFile(str(html)))

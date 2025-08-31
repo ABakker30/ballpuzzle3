@@ -112,11 +112,15 @@ class MainWindow(QMainWindow):
         # wiring
         self.btnRefreshTop.clicked.connect(self.solve_tab.refresh_all)  # callable slot is fine
         self.btnOpen.clicked.connect(self._pick_world_file)
-        self.btnStart.clicked.connect(self._start_solver)
+        self.btnStart.clicked.connect(self.on_start_clicked)
         self.btnStop.clicked.connect(self._stop_solver)
         self.btnPause.clicked.connect(self._toggle_pause_resume)
 
         self._update_buttons()
+
+    def on_start_clicked(self):
+        self.solve_tab.reset_progress_ui()
+        self._start_solver()
 
     # ---------- Start / Pause / Stop ----------
     def _start_solver(self):

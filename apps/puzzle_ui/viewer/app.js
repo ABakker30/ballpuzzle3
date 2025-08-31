@@ -70,21 +70,26 @@ function initThree() {
   controls.enableRotate = true;
   controls.enableZoom = true;
 
-  // simple physically-plausible-ish light rig
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x111122, 0.35);
-  window.scene.add(hemi);
-  const key = new THREE.DirectionalLight(0xffffff, 0.9);
-  key.position.set(1.5, 2.0, 1.0);
-  window.scene.add(key);
-  const fill = new THREE.DirectionalLight(0xffffff, 0.3);
-  fill.position.set(-2.0, 1.0, 0.5);
-  window.scene.add(fill);
-  const rim = new THREE.DirectionalLight(0xffffff, 0.6);
-  rim.position.set(-1.0, 1.5, -2.0);
-  window.scene.add(rim);
+  // --- Brightness control (v1.3 add) ---
+  let ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
+  scene.add(ambientLight);
 
-  const axes = new THREE.AxesHelper(2.5);
-  window.scene.add(axes);
+  let dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+  dirLight.position.set(5, 6, 7);
+  scene.add(dirLight);
+
+  window.setBrightness = function (value) {
+    const v = Math.max(0.1, Math.min(Number(value) || 1.0, 5.0));
+    ambientLight.intensity = 1.0 * v;
+    dirLight.intensity = 1.5 * v;
+
+    if (renderer && renderer.toneMappingExposure !== undefined) {
+      renderer.toneMappingExposure = v;
+    }
+    console.log("Brightness set to", v);
+  };
+
+  setBrightness(1.5);
 
   animate();
   window.addEventListener('resize', onResize);
