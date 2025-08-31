@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Studio</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { height:100%; margin:0; background:#111; color:#ddd; }
+    #root { position:absolute; inset:0; }
+    #status { position:fixed; left:10px; top:10px; padding:4px 8px; background:rgba(0,0,0,0.4); border-radius:6px; font:12px/1.1 sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="status">Studio: no file loaded</div>
+
+  <!-- Use the SAME library includes you use in viewer/index.html -->
+  <script src="../viewer/libs/three.min.js"></script>
+  <script src="../viewer/libs/OrbitControls.js"></script>
+  <script type="module" src="./app.js"></script>
+
+</body>
+</html>

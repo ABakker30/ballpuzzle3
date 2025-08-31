@@ -4,6 +4,12 @@ import re
 import os, json, time
 from pathlib import Path
 
+# Allow running this file directly: python apps\puzzle_ui\ui\main.py
+import os, sys
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 # Precompiled regex for solver stdout lines like:
 # [run 0 seed=42000] placed 22/25 | best 24 | rate 7301/s
 STDOUT_PROGRESS_RE = re.compile(
@@ -13,7 +19,7 @@ STDOUT_PROGRESS_RE = re.compile(
 
 _UI_DIR = Path(__file__).resolve().parent
 # If running as a script (no package), add the ui folder to sys.path
-if __name__ == "__main__" and (__package__ is None or __package__ == ""):
+if __package__ is None or __package__ == "":
     if str(_UI_DIR) not in sys.path:
         sys.path.insert(0, str(_UI_DIR))
 # Try relative imports first (module mode), fall back to local (script mode)
@@ -95,19 +101,21 @@ class MainWindow(QMainWindow):
         top.addStretch(1); top.addWidget(self.lblStatus)
 
         # Tabs
-        tabs = QTabWidget(self)
+        self.tabs = QTabWidget(self)
         self.solve_tab = SolveTab(self)
-        tabs.addTab(self.solve_tab, "Solve")
+        self.tabs.addTab(self.solve_tab, "Solve")
+        from apps.puzzle_ui.ui.components.studio_tab import StudioTab
+        self.tabs.addTab(StudioTab(self), "Studio")
 
         mint = QWidget(self); mv = QVBoxLayout(mint)
         mv.addWidget(QLabel("Mint Solution (placeholder)\n\nWill collect metadata, connect wallet, submit tx, and show receipt.", mint)); mv.addStretch(1)
-        tabs.addTab(mint, "Mint Solution")
+        self.tabs.addTab(mint, "Mint Solution")
 
         builder = QWidget(self); bv = QVBoxLayout(builder)
         bv.addWidget(QLabel("Container Builder (placeholder)\n\nWill author/validate container JSON.", builder)); bv.addStretch(1)
-        tabs.addTab(builder, "Container Builder")
+        self.tabs.addTab(builder, "Container Builder")
 
-        v.addLayout(top); v.addWidget(tabs, 1)
+        v.addLayout(top); v.addWidget(self.tabs, 1)
 
         # wiring
         self.btnRefreshTop.clicked.connect(self.solve_tab.refresh_all)  # callable slot is fine
