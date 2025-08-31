@@ -45,16 +45,38 @@ class StudioTab(QWidget):
         row.addSpacing(12)
         row.addWidget(self.btnSave, 0, Qt.AlignLeft)
 
-        self.btnAssemble = QPushButton("Assemble (Z →)…")
-        row.addSpacing(12)
-        row.addWidget(self.btnAssemble, 0, Qt.AlignLeft)
-
         row.addWidget(self.btnOpen, 0, Qt.AlignLeft)
         row.addWidget(QLabel("Colors:"))
         row.addWidget(self.cmbColors, 0, Qt.AlignLeft)
         row.addSpacing(12)
         row.addWidget(QLabel("Brightness:"))
         row.addWidget(self.sldBright, 0, Qt.AlignLeft)
+
+        # Orientation selector
+        self.cmbOrient = QComboBox()
+        self.cmbOrient.setMinimumWidth(220)
+        self.cmbOrient.addItem("None", "none")
+        self.cmbOrient.addItem("Largest face to XY", "largest-face-xy")
+        self.cmbOrient.addItem("Smallest face to XY", "smallest-face-xy")
+        self.cmbOrient.setCurrentIndex(0)
+
+        row.addSpacing(12)
+        row.addWidget(QLabel("Orientation:"))
+        row.addWidget(self.cmbOrient, 0, Qt.AlignLeft)
+
+        # --- Animation preset + Play
+        self.cmbAnim = QComboBox()
+        self.cmbAnim.setMinimumWidth(240)
+        self.cmbAnim.addItem("Assemble: Bottom-up (Z →)", "assemble-bottomup")
+        self.cmbAnim.addItem("Camera: Orbit 360° (XY)", "orbit-xy")
+
+        self.btnPlay = QPushButton("Play")
+
+        row.addSpacing(12)
+        row.addWidget(QLabel("Animation:"))
+        row.addWidget(self.cmbAnim, 0, Qt.AlignLeft)
+        row.addWidget(self.btnPlay, 0, Qt.AlignLeft)
+
         row.addStretch(1)
 
         # --- Web view (isolated Studio viewer)
@@ -82,14 +104,22 @@ class StudioTab(QWidget):
                 f'(window.setStudioBrightness ? setStudioBrightness({v}/100.0) : console.warn("Studio not ready"))'
             )
         )
+        self.cmbOrient.currentIndexChanged.connect(
+            lambda _:
+                self.web.page().runJavaScript(
+                    f'(window.setStudioOrientation ? setStudioOrientation("{self.cmbOrient.currentData()}") : undefined)'
+                )
+        )
         self.web.loadFinished.connect(
-            lambda ok: self.web.page().runJavaScript(
-                f'(window.setColorStrategy ? setColorStrategy("{self.cmbColors.currentData()}") : console.warn("Studio not ready"));'
-                f'(window.setStudioBrightness ? setStudioBrightness({self.sldBright.value()/100.0}) : console.warn("Studio not ready"));'
-            )
+            lambda ok:
+                self.web.page().runJavaScript(
+                    f'(window.setColorStrategy ? setColorStrategy("{self.cmbColors.currentData()}") : undefined);'
+                    f'(window.setStudioBrightness ? setStudioBrightness({self.sldBright.value()/100.0}) : undefined);'
+                    f'(window.setStudioOrientation ? setStudioOrientation("{self.cmbOrient.currentData()}") : undefined);'
+                )
         )
         self.btnSave.clicked.connect(self._on_save_png)
-        self.btnAssemble.clicked.connect(self._on_assemble)
+        self.btnPlay.clicked.connect(self._on_play_anim)
 
     def _on_open(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -140,13 +170,21 @@ class StudioTab(QWidget):
         # Run JS and get the data URL back
         self.web.page().runJavaScript(js, _write_png)
 
-    def _on_assemble(self):
+    def _on_play_anim(self):
+        key = self.cmbAnim.currentData()
+        # Ask for duration
         dur, ok = QInputDialog.getDouble(
-            self, "Bottom-Up Assemble", "Duration (seconds):",
-            10.0, 1.0, 300.0, 1  # default 10s, min 1, max 300, 1 decimal
+            self, "Animation Duration", "Duration (seconds):",
+            10.0, 1.0, 600.0, 1
         )
         if not ok:
             return
-        self.web.page().runJavaScript(
-            f'(window.studioPlayAssembleBottomUp ? studioPlayAssembleBottomUp({dur}) : console.warn("Studio not ready"))'
-        )
+
+        if key == "assemble-bottomup":
+            self.web.page().runJavaScript(
+                f'(window.studioPlayAssembleBottomUp ? studioPlayAssembleBottomUp({dur}) : console.warn("Studio not ready"))'
+            )
+        elif key == "orbit-xy":
+            self.web.page().runJavaScript(
+                f'(window.studioPlayOrbitXY ? studioPlayOrbitXY({dur}) : console.warn("Studio not ready"))'
+            )

@@ -133,6 +133,171 @@ function addBondsForAtoms(container, atoms, mat){
   }
 }
 
+// ---- Studio world orientation (None / Largest face to XY / Smallest face to XY)
+let __orientMode = "none";                             // 'none' | 'largest-face-xy' | 'smallest-face-xy'
+let __orientQuat = new THREE.Quaternion();             // identity by default
+let __lastSnapshot = null;                             // normalized snapshot we last built
+
+// Compute covariance of centered points (3x3 symmetric)
+function _covariance3(pts) {
+  const n = pts.length;
+  if (n === 0) return { xx:0, xy:0, xz:0, yy:0, yz:0, zz:0, mean:new THREE.Vector3() };
+
+  const mean = new THREE.Vector3();
+  for (const p of pts) mean.add(p);
+  mean.multiplyScalar(1 / n);
+
+  let xx=0, xy=0, xz=0, yy=0, yz=0, zz=0;
+  for (const p of pts) {
+    const x = p.x - mean.x, y = p.y - mean.y, z = p.z - mean.z;
+    xx += x*x; xy += x*y; xz += x*z;
+    yy += y*y; yz += y*z;
+    zz += z*z;
+  }
+  const inv = 1 / Math.max(1, n - 1);  // unbiased estimate
+  return {
+    xx: xx*inv, xy: xy*inv, xz: xz*inv,
+    yy: yy*inv, yz: yz*inv,
+    zz: zz*inv,
+    mean
+  };
+}
+
+// Jacobi eigen-decomposition for 3x3 symmetric matrix (covariance)
+function _eigenSym3(c) {
+  // Matrix in array form [a00,a01,a02, a01,a11,a12, a02,a12,a22]
+  let a00=c.xx, a01=c.xy, a02=c.xz, a11=c.yy, a12=c.yz, a22=c.zz;
+
+  // Eigenvectors start as identity
+  let v00=1, v01=0, v02=0,
+      v10=0, v11=1, v12=0,
+      v20=0, v21=0, v22=1;
+
+  const EPS = 1e-12, MAX_IT=50;
+  for (let it=0; it<MAX_IT; it++) {
+    // find largest off-diagonal
+    let p=0, q=1, max = Math.abs(a01);
+    let a02abs = Math.abs(a02), a12abs = Math.abs(a12);
+    if (a02abs > max) { max = a02abs; p=0; q=2; }
+    if (a12abs > max) { max = a12abs; p=1; q=2; }
+    if (max < EPS) break;
+
+    // compute rotation
+    let apq, app, aqq;
+    if (p===0 && q===1) { apq=a01; app=a00; aqq=a11; }
+    else if (p===0 && q===2) { apq=a02; app=a00; aqq=a22; }
+    else { apq=a12; app=a11; aqq=a22; }
+
+    const phi = 0.5 * Math.atan2(2*apq, (aqq - app));
+    const coss = Math.cos(phi), sinn = Math.sin(phi);
+
+    // rotate A
+    function rotA(i,j) {
+      // A' = R^T A R ; implement by updating needed elements
+    }
+    // Update A explicitly for each p,q choice
+    if (p===0 && q===1) {
+      const a00n = coss*coss*a00 - 2*coss*sinn*a01 + sinn*sinn*a11;
+      const a11n = sinn*sinn*a00 + 2*coss*sinn*a01 + coss*coss*a11;
+      const a01n = 0;
+      const a02n = coss*a02 - sinn*a12;
+      const a12n = sinn*a02 + coss*a12;
+      a00=a00n; a11=a11n; a01=a01n; a02=a02n; a12=a12n;
+    } else if (p===0 && q===2) {
+      const a00n = coss*coss*a00 - 2*coss*sinn*a02 + sinn*sinn*a22;
+      const a22n = sinn*sinn*a00 + 2*coss*sinn*a02 + coss*coss*a22;
+      const a02n = 0;
+      const a01n = coss*a01 - sinn*a12;
+      const a12n = sinn*a01 + coss*a12;
+      a00=a00n; a22=a22n; a02=a02n; a01=a01n; a12=a12n;
+    } else { // p=1,q=2
+      const a11n = coss*coss*a11 - 2*coss*sinn*a12 + sinn*sinn*a22;
+      const a22n = sinn*sinn*a11 + 2*coss*sinn*a12 + coss*coss*a22;
+      const a12n = 0;
+      const a01n = coss*a01 - sinn*a02;
+      const a02n = sinn*a01 + coss*a02;
+      a11=a11n; a22=a22n; a12=a12n; a01=a01n; a02=a02n;
+    }
+
+    // rotate V (accumulate eigenvectors)
+    function updV(ix, jx) { /* no-op; expand below */ }
+    if (p===0 && q===1) {
+      const nv00 = coss*v00 - sinn*v01, nv01 = sinn*v00 + coss*v01;
+      const nv10 = coss*v10 - sinn*v11, nv11 = sinn*v10 + coss*v11;
+      const nv20 = coss*v20 - sinn*v21, nv21 = sinn*v20 + coss*v21;
+      v00=nv00; v01=nv01;
+      v10=nv10; v11=nv11;
+      v20=nv20; v21=nv21;
+    } else if (p===0 && q===2) {
+      const nv00 = coss*v00 - sinn*v02, nv02 = sinn*v00 + coss*v02;
+      const nv10 = coss*v10 - sinn*v12, nv12 = sinn*v10 + coss*v12;
+      const nv20 = coss*v20 - sinn*v22, nv22 = sinn*v20 + coss*v22;
+      v00=nv00; v02=nv02;
+      v10=nv10; v12=nv12;
+      v20=nv20; v22=nv22;
+    } else {
+      const nv01 = coss*v01 - sinn*v02, nv02 = sinn*v01 + coss*v02;
+      const nv11 = coss*v11 - sinn*v12, nv12 = sinn*v11 + coss*v12;
+      const nv21 = coss*v21 - sinn*v22, nv22 = sinn*v21 + coss*v22;
+      v01=nv01; v02=nv02;
+      v11=nv11; v12=nv12;
+      v21=nv21; v22=nv22;
+    }
+  }
+
+  // Eigenvalues on the diagonal; eigenvectors are columns of V
+  const evals = [a00, a11, a22];
+  const evecs = [
+    new THREE.Vector3(v00, v10, v20),
+    new THREE.Vector3(v01, v11, v21),
+    new THREE.Vector3(v02, v12, v22),
+  ];
+  // Normalize eigenvectors
+  for (const v of evecs) v.normalize();
+
+  // Sort by descending eigenvalue
+  const idx = [0,1,2].sort((i,j) => evals[j]-evals[i]);
+  return {
+    evals: [evals[idx[0]], evals[idx[1]], evals[idx[2]]],
+    evecs: [evecs[idx[0]], evecs[idx[1]], evecs[idx[2]]]
+  };
+}
+
+// Compute quaternion that orients the chosen "face normal" to +Z
+function _computeOrientQuat(points, mode) {
+  if (!points || points.length < 2 || mode === "none") {
+    return new THREE.Quaternion(); // identity
+  }
+  // PCA on centers → principal directions
+  const cov = _covariance3(points);
+  const { evals, evecs } = _eigenSym3(cov);
+  // For "largest face to XY": pick smallest variance dir as normal
+  // For "smallest face to XY": pick largest variance dir as normal
+  let normal, inPlane;
+  if (mode === "largest-face-xy") {
+    normal = evecs[2].clone();        // smallest eigenvalue
+    inPlane = evecs[0].clone();       // largest eigenvalue (for deterministic X)
+  } else { // "smallest-face-xy"
+    normal = evecs[0].clone();        // largest eigenvalue
+    inPlane = evecs[1].clone();       // second-largest
+  }
+
+  // Step 1: rotate normal -> +Z
+  const zAxis = new THREE.Vector3(0,0,1);
+  const q1 = new THREE.Quaternion().setFromUnitVectors(normal.clone().normalize(), zAxis);
+
+  // Step 2: align in-plane axis to +X for stable orientation
+  const ip = inPlane.clone().applyQuaternion(q1);
+  ip.z = 0; // project to XY
+  if (ip.lengthSq() > 1e-12) {
+    ip.normalize();
+    const ang = Math.atan2(ip.y, ip.x);          // angle from +X
+    const q2 = new THREE.Quaternion().setFromAxisAngle(zAxis, -ang);
+    return q2.multiply(q1);
+  }
+  return q1;
+}
+
 // ---- Scene setup (one-time fit, no auto-refit) ----
 let __zoomLocked = false, __savedOrthoZoom = null;
 
@@ -190,6 +355,7 @@ function init(){
   scene.background = new THREE.Color(0x111111);
 
   camera = new THREE.PerspectiveCamera(75, el.clientWidth / el.clientHeight, 0.01, 1000);
+  camera.up.set(0, 0, 1);  // Z-up for turntable feel (no roll)
   camera.position.set(8,8,8);
 
   controls = new OrbitControls(camera, renderer.domElement);
@@ -290,13 +456,69 @@ function _stepAssembleBottomUp() {
   }
 }
 
-// Hook the stepper into your render loop
+function _stepAnimation() {
+  if (!__anim) return;
+  if (__anim.kind === 'bottomup') _stepAssembleBottomUp();
+  else if (__anim.kind === 'orbitxy') _stepOrbitXY();
+}
+
 function animate(){
   requestAnimationFrame(animate);
   controls.update();
-  _stepAssembleBottomUp();   // <-- add this line
+  _stepAnimation();              // ← dispatch both kinds safely
   renderer.render(scene, camera);
 }
+
+// Step the camera around Z (XY plane) 0→360°, keeping distance and height constant
+function _stepOrbitXY() {
+  if (!__anim || __anim.kind !== 'orbitxy') return;
+  const now = performance.now();
+  const t = Math.min(1, (now - __anim.start) / __anim.duration);  // 0..1
+  const phi = __anim.phi0 + 2 * Math.PI * t;
+
+  // Rotate position around Z, keep z offset and target fixed
+  const cx = __anim.center.x, cy = __anim.center.y, cz = __anim.center.z;
+  const x = cx + __anim.rxy * Math.cos(phi);
+  const y = cy + __anim.rxy * Math.sin(phi);
+  const z = cz + __anim.zOff;
+
+  camera.position.set(x, y, z);
+  camera.lookAt(__anim.center);
+
+  if (t >= 1) {
+    // end exactly at full rotation
+    camera.position.set(
+      cx + __anim.rxy * Math.cos(__anim.phi0 + 2 * Math.PI),
+      cy + __anim.rxy * Math.sin(__anim.phi0 + 2 * Math.PI),
+      cz + __anim.zOff
+    );
+    camera.lookAt(__anim.center);
+    __anim = null;
+    setStatus("Studio: orbit complete");
+  }
+}
+
+// Public: start Orbit 360° (XY)
+window.studioPlayOrbitXY = function(durationSec) {
+  if (!camera || !controls) { setStatus("Studio: camera not ready"); return; }
+
+  const center = controls.target.clone();
+  const rel = camera.position.clone().sub(center);
+  const rxy = Math.hypot(rel.x, rel.y);   // horizontal radius from center
+  const zOff = rel.z;                      // keep current height
+  const phi0 = Math.atan2(rel.y, rel.x);  // starting angle in XY
+
+  __anim = {
+    kind: 'orbitxy',
+    start: performance.now(),
+    duration: Math.max(500, (Number(durationSec)||10) * 1000),
+    center,
+    rxy,
+    zOff,
+    phi0,
+  };
+  setStatus(`Studio: orbit 360° in ${Math.round(__anim.duration/1000)}s`);
+};
 
 // ---- PNG capture (export current view) ----
 window.studioCapturePng = function(scale = 2) {
@@ -367,50 +589,56 @@ function buildSceneFromSnapshot(snapshot) {
 
   const pieces = snapshot.pieces || [];
   const isContainer = snapshot.kind === "container";
+  const total = pieces.length || __PIECE_COUNT_DEFAULT;
 
+  // --- NEW: gather all centers into an array of THREE.Vector3 for orientation ---
+  const allPts = [];
   for (const p of pieces) {
-    const total = pieces.length || __PIECE_COUNT_DEFAULT;
+    for (const c of (p.centers || [])) {
+      allPts.push(new THREE.Vector3(c.x, c.y, c.z));
+    }
+  }
+  // Compute the quaternion once for this snapshot (according to current mode)
+  __orientQuat = _computeOrientQuat(allPts, __orientMode);
 
-    // For containers: force a single vibrant material; skip bonds
-    const mat = isContainer
-      ? makeContainerMaterial(p.material_key || p.id)    // <- colorful single material
-      : makePieceMaterialFor(p.material_key || p.id, 0, total);
+  const atomR = snapshot.radius || 0.5;
 
-    const atomR = snapshot.radius || 0.5;
+  let min = new THREE.Vector3( Infinity, Infinity, Infinity);
+  let max = new THREE.Vector3(-Infinity,-Infinity,-Infinity);
+
+  pieces.forEach((p, idx) => {
     const g = new THREE.Group();
     g.name = p.id;
-
-    // mark containers so recolor skips them
     if (isContainer) g.userData.isContainer = true;
+    else             g.userData.pieceKey   = p.material_key || p.id;
 
-    // (optional) for pieces, keep a stable key for recolor:
-    if (!isContainer) g.userData.pieceKey = p.material_key || p.id;
+    const mat = isContainer
+      ? makeContainerMaterial(p.material_key || p.id)
+      : makePieceMaterialFor(p.material_key || p.id, idx, total);
 
-    const atoms = p.centers.map(c => {
+    const atoms = [];
+    for (const c of p.centers) {
+      const v = new THREE.Vector3(c.x, c.y, c.z).applyQuaternion(__orientQuat);  // <--- apply orientation
       const s = new THREE.Mesh(new THREE.SphereGeometry(atomR, 24, 16), mat);
-      s.position.set(c.x, c.y, c.z);
-      g.add(s);
-      return s;
-    });
+      s.userData.isAtom = true;
+      s.position.copy(v);
+      g.add(s); atoms.push(s);
 
-    if (!isContainer) {
-      addBondsForAtoms(g, atoms, mat);     // bonds ON for pieces
+      min.min(v); max.max(v);  // bbox from oriented points
     }
 
-    root.add(g);                            // <- must be root.add(g), NOT scene.add(g)
-  }
+    if (!isContainer) addBondsForAtoms(g, atoms, mat);
+    root.add(g);
+  });
 
   const bbox = new THREE.Box3().setFromObject(root);
-  const min = bbox.min;
-  const max = bbox.max;
-
-  const newCenter = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
+  const newCenter = new THREE.Vector3().addVectors(bbox.min, bbox.max).multiplyScalar(0.5);
 
   if (!__zoomLocked) {
     // First load: fit once, then lock zoom
     controls.target.copy(newCenter);
 
-    const ext = new THREE.Vector3().subVectors(max, min);
+    const ext = new THREE.Vector3().subVectors(bbox.max, bbox.min);
     const longest = Math.max(ext.x, ext.y, ext.z) * 0.6 + 6;
     camera.position.set(newCenter.x + longest, newCenter.y + longest, newCenter.z + longest);
     camera.lookAt(newCenter);
@@ -434,6 +662,7 @@ function buildSceneFromSnapshot(snapshot) {
 
   setStatus(`Studio: loaded ${isContainer ? pieces[0]?.centers?.length ?? 0 : pieces.length} ${isContainer ? "container cell(s)" : "piece(s)"}`);
   renderer.render(scene, camera);
+  __lastSnapshot = snapshot;   // keep for re-orienting on dropdown change
 }
 
 // Recolor all piece groups in place (skip containers), using the actual group count
@@ -484,19 +713,31 @@ function studioLoadJson(jsonText){
 // Start: assemble pieces from lowest Z to highest (duration in seconds)
 function studioPlayAssembleBottomUp(durationSec) {
   const groups = _pieceGroups();
-  if (!groups.length) {
-    setStatus("Studio: no pieces to animate"); 
-    return;
+  if (!groups.length) { setStatus("Studio: no pieces to animate"); return; }
+
+  // Gather world-space atoms, minZ, centroids (oriented positions already baked)
+  const pcs = _collectPiecesAtomsWorld();
+
+  // Estimate lattice neighbor distance and build adjacency
+  const nn = _estimateNeighborDistance(pcs);
+  const EPS = nn * 0.06;                      // 6% tolerance; adjust if needed
+
+  const adj = _buildAdjacency(pcs, nn, EPS);
+  // Choose start on XY plane: within tolZ of global minZ
+  const tolZ = Math.max(1e-4, nn * 0.05);
+  const startIdx = _chooseStartIndex(pcs, tolZ);
+  if (startIdx < 0) { setStatus("Studio: cannot choose start piece"); return; }
+
+  const { order, complete } = _connectedOrder(pcs, adj, startIdx);
+  if (!order.length) { setStatus("Studio: no connected order"); return; }
+  if (!complete) {
+    setStatus(`Studio: graph disconnected — assembling first ${order.length} connected piece(s)`);
+  } else {
+    setStatus(`Studio: assembling ${order.length} piece(s)`);
   }
 
-  // sort by min world Z (lowest first)
-  const sorted = groups
-    .map(g => ({ g, z: _minWorldZ(g) }))
-    .sort((a,b) => a.z - b.z)
-    .map(o => o.g);
-
-  // initialize: hide all, make materials transparent, collapse bonds
-  sorted.forEach(g => {
+  // Initialize visual state: hide all; transparent; bonds collapsed
+  for (const g of groups) {
     g.visible = false;
     g.traverse(o => {
       if (o.isMesh) {
@@ -507,15 +748,17 @@ function studioPlayAssembleBottomUp(durationSec) {
         }
       }
     });
-  });
+  }
+
+  // Map order of indices → ordered group list
+  const orderedGroups = order.map(i => pcs[i].group);
 
   __anim = {
     kind: 'bottomup',
     start: performance.now(),
     duration: Math.max(500, (Number(durationSec) || 10) * 1000),
-    groups: sorted
+    groups: orderedGroups
   };
-  setStatus(`Studio: assembling bottom-up (${groups.length} pieces, ${Math.round(__anim.duration/1000)}s)`);
 };
 
 // Optional: stop
@@ -529,6 +772,172 @@ window.setColorStrategy        = window.setColorStrategy        || setColorStrat
 window.setStudioBrightness     = window.setStudioBrightness     || setStudioBrightness;
 window.studioLoadJson          = window.studioLoadJson          || studioLoadJson;
 window.studioPlayAssembleBottomUp = window.studioPlayAssembleBottomUp || studioPlayAssembleBottomUp;
+window.studioPlayOrbitXY          = window.studioPlayOrbitXY          || studioPlayOrbitXY;
+window.setStudioOrientation    = window.setStudioOrientation    || setStudioOrientation;
 
 // boot
 init();
+
+// NEW: set orientation dropdown handler
+function setStudioOrientation(mode) {
+  const m = String(mode || "none");
+  if (m !== "none" && m !== "largest-face-xy" && m !== "smallest-face-xy") return;
+  if (__orientMode === m) return;
+
+  __orientMode = m;
+
+  // Rebuild with the same snapshot, preserving camera feel:
+  if (__lastSnapshot) {
+    // compute old pivot
+    const oldTarget = controls.target.clone();
+
+    // rebuild scene (will compute new pivot)
+    buildSceneFromSnapshot(__lastSnapshot);
+
+    // After build, we already translate the camera by pivot delta inside the build
+    // (your build logic moves camera by delta when __zoomLocked is true).
+    // Nothing else to do here.
+  }
+};
+
+// ---- Connected assembly sequencing (start on XY plane) ----
+
+// Gather non-container piece groups and their atoms' WORLD positions
+function _collectPiecesAtomsWorld() {
+  const groups = _pieceGroups();              // existing helper: non-container groups
+  const v = new THREE.Vector3();
+  return groups.map((g) => {
+    const atoms = [];
+    g.traverse((o) => {
+      if (o.isMesh && o.userData?.isAtom) {
+        o.getWorldPosition(v);
+        atoms.push(v.clone());
+      }
+    });
+    // centroid & minZ (world)
+    const c = new THREE.Vector3();
+    let minZ = Infinity;
+    atoms.forEach(p => { c.add(p); if (p.z < minZ) minZ = p.z; });
+    if (atoms.length) c.multiplyScalar(1 / atoms.length);
+    return { group: g, atoms, centroid: c, minZ };
+  });
+}
+
+// Estimate nearest-neighbor center distance across ALL atoms (robust, N≈100)
+function _estimateNeighborDistance(pieces) {
+  let dmin = Infinity;
+  for (let i = 0; i < pieces.length; i++) {
+    const A = pieces[i].atoms;
+    for (let ai = 0; ai < A.length; ai++) {
+      const a = A[ai];
+      for (let j = i; j < pieces.length; j++) {
+        const B = pieces[j].atoms;
+        for (let bi = 0; bi < B.length; bi++) {
+          // skip identical point compare (same index in same piece)
+          if (i === j && ai === bi) continue;
+          const d = a.distanceTo(B[bi]);
+          if (d > 1e-9 && d < dmin) dmin = d;
+        }
+      }
+    }
+  }
+  return (dmin === Infinity ? 1.0 : dmin);
+}
+
+// Build adjacency: pieces i,j are neighbors if ANY atom pair ~ neighborDist
+function _buildAdjacency(pieces, neighborDist, eps) {
+  const n = pieces.length;
+  const adj = Array.from({ length: n }, () => new Set());
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      let touch = false;
+      outer: for (const a of pieces[i].atoms) {
+        for (const b of pieces[j].atoms) {
+          const d = a.distanceTo(b);
+          if (Math.abs(d - neighborDist) <= eps) { touch = true; break outer; }
+        }
+      }
+      if (touch) {
+        adj[i].add(j);
+        adj[j].add(i);
+      }
+    }
+  }
+  return adj;
+}
+
+// Choose start piece: on XY plane → minimal minZ (± tol), tie-break by radius then name
+function _chooseStartIndex(pieces, tolZ) {
+  let minZ = Infinity;
+  for (const p of pieces) if (p.minZ < minZ) minZ = p.minZ;
+  const target = minZ + tolZ;
+
+  // controls.target is our pivot; fall back to bbox center if needed
+  const pivot = (controls && controls.target) ? controls.target.clone() : new THREE.Vector3();
+  let best = { idx: -1, score: Infinity, name: "" };
+
+  for (let i = 0; i < pieces.length; i++) {
+    const p = pieces[i];
+    if (p.minZ <= target) {
+      const dx = p.centroid.x - pivot.x;
+      const dy = p.centroid.y - pivot.y;
+      const r2 = dx*dx + dy*dy;                   // prefer closer to pivot
+      const name = p.group.name || String(i);
+      const score = r2;                            // primary key
+      if (score < best.score || (score === best.score && name < best.name)) {
+        best = { idx: i, score, name };
+      }
+    }
+  }
+  // If no one met tol, pick absolute lowest minZ (tie by r2)
+  if (best.idx === -1) {
+    for (let i = 0; i < pieces.length; i++) {
+      if (pieces[i].minZ === minZ) {
+        const dx = pieces[i].centroid.x - pivot.x;
+        const dy = pieces[i].centroid.y - pivot.y;
+        const r2 = dx*dx + dy*dy;
+        const name = pieces[i].group.name || String(i);
+        const score = r2;
+        if (best.idx === -1 || score < best.score || (score === best.score && name < best.name)) {
+          best = { idx: i, score, name };
+        }
+      }
+    }
+  }
+  return best.idx;
+}
+
+// BFS to get a connected build order from start; neighbors only
+function _connectedOrder(pieces, adj, startIdx) {
+  const n = pieces.length;
+  const visited = new Array(n).fill(false);
+  const order = [];
+  const q = [];
+
+  visited[startIdx] = true;
+  q.push(startIdx);
+
+  // deterministic neighbor iteration: by distance to pivot, then by name
+  const pivot = (controls && controls.target) ? controls.target.clone() : new THREE.Vector3();
+  const sortNeighbors = (idxs) => {
+    return idxs.slice().sort((a, b) => {
+      const pa = pieces[a], pb = pieces[b];
+      const da = pa.centroid.distanceTo(pivot), db = pb.centroid.distanceTo(pivot);
+      if (da !== db) return da - db;
+      const na = pa.group.name || String(a), nb = pb.group.name || String(b);
+      return na < nb ? -1 : na > nb ? 1 : 0;
+    });
+  };
+
+  while (q.length) {
+    const u = q.shift();
+    order.push(u);
+    const nbrs = sortNeighbors(Array.from(adj[u]).filter(v => !visited[v]));
+    for (const v of nbrs) {
+      visited[v] = true;
+      q.push(v);
+    }
+  }
+  const complete = (order.length === n);
+  return { order, complete };
+}
