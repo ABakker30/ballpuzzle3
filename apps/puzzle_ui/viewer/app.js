@@ -192,6 +192,65 @@ function clearSceneMeshes() {
   });
 }
 
+// ===== Bonds (fixed radius, neighbor-only) =====
+const BOND_RADIUS   = 0.12;   // tweak to taste (e.g. 0.08–0.18 world units)
+const BOND_SEGMENTS = 12;     // cylinder roundness
+const _UP_Y         = new THREE.Vector3(0, 1, 0);
+
+// Make one cylinder between two LOCAL positions a,b, using the piece's material
+function _createBondMesh(a, b, radius, material) {
+  const dir = new THREE.Vector3().subVectors(b, a);
+  const len = dir.length();
+  if (len < 1e-9) return null;
+
+  const geom = new THREE.CylinderGeometry(1, 1, 1, BOND_SEGMENTS, 1, false);
+  const mesh = new THREE.Mesh(geom, material);
+
+  // midpoint
+  mesh.position.copy(new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5));
+  // orient +Y → dir
+  mesh.quaternion.setFromUnitVectors(_UP_Y, dir.clone().normalize());
+  // scale: X/Z = radius, Y = actual distance
+  mesh.scale.set(radius, len, radius);
+
+  // tag so later traversals can ignore bonds when collecting atoms
+  mesh.userData.isBond = true;
+  return mesh;
+}
+
+/**
+ * Build bonds right where the piece's spheres were just added.
+ * container: Object3D you added the spheres to (piece container)
+ * atoms:     array of the sphere Meshes you just created (for this piece)
+ * material:  the same material used for those spheres (pass the reference)
+ */
+function addBondsForAtoms(container, atoms, material) {
+  if (!atoms || atoms.length < 2 || BOND_RADIUS <= 0) return;
+
+  // shortest non-zero distance = neighbor distance
+  let minDist = Infinity;
+  for (let i = 0; i < atoms.length; i++) {
+    for (let j = i + 1; j < atoms.length; j++) {
+      const d = atoms[i].position.distanceTo(atoms[j].position);
+      if (d > 1e-6 && d < minDist) minDist = d;
+    }
+  }
+  if (!isFinite(minDist)) return;
+
+  const EPS = minDist * 0.05; // ±5% tolerance; bump to 0.06–0.08 if needed
+
+  // only connect neighbor pairs (distance ≈ minDist)
+  for (let i = 0; i < atoms.length; i++) {
+    for (let j = i + 1; j < atoms.length; j++) {
+      const d = atoms[i].position.distanceTo(atoms[j].position);
+      if (Math.abs(d - minDist) <= EPS) {
+        const bond = _createBondMesh(atoms[i].position, atoms[j].position, BOND_RADIUS, material);
+        if (bond) container.add(bond);
+      }
+    }
+  }
+}
+
 // ---------- main payload entry ----------
 function drawPayload(payload) {
   // Normalize schema differences
@@ -233,15 +292,23 @@ function drawPayload(payload) {
     inst.userData.isPieceMesh = true;
 
     const tmp = new THREE.Object3D();
+    const atomMeshes = [];
     for (let i = 0; i < centers.length; i++) {
       const c = centers[i];
       if (!Array.isArray(c) || c.length < 3) continue;
       tmp.position.set(c[0], c[1], c[2]);
       tmp.updateMatrix();
       inst.setMatrixAt(i, tmp.matrix);
+      const atomMesh = new THREE.Mesh(sphereGeom, mat);
+      atomMesh.position.set(c[0], c[1], c[2]);
+      atomMeshes.push(atomMesh);
     }
     inst.instanceMatrix.needsUpdate = true;
-    window.scene.add(inst);
+    const pieceGroup = new THREE.Group();
+    pieceGroup.add(inst);
+    atomMeshes.forEach(mesh => pieceGroup.add(mesh));
+    window.scene.add(pieceGroup);
+    addBondsForAtoms(pieceGroup, atomMeshes, mat);
   });
 }
 
