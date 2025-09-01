@@ -942,3 +942,28 @@ tryWireUI();
     } catch (_) {}
   }
 })();
+
+// Deterministic dropdown wiring (works with your Admin Play UI)
+function studioRegisterAnim(selectEl, playBtn){
+  if (!selectEl || !playBtn) return studioStatus("Anim UI not found", "error");
+  if (![...selectEl.options].some(o => o.value === "physics-snuggle")){
+    selectEl.add(new Option("Physics: Snuggle", "physics-snuggle"));
+  }
+  if (!playBtn.__snuggleWired){
+    playBtn.addEventListener("click", async () => {
+      if (selectEl.value === "physics-snuggle") await studioPlaySnuggle();
+    });
+    playBtn.__snuggleWired = true;
+  }
+  studioStatus("Snuggle UI wired.");
+}
+
+// Call once after DOM mounts (covers PyQt/iframe late-DOM too)
+window.addEventListener("DOMContentLoaded", () => {
+  // Prefer a labeled "Animation" select near your Admin Play UI; fallback to first select/button
+  const selects = [...document.querySelectorAll("select")];
+  const select = selects.find(s => (s.closest("label,div,section")?.innerText || "").toLowerCase().includes("animation"))
+               || selects[0] || null;
+  const playBtn = [...document.querySelectorAll("button")].find(b => /play/i.test(b.textContent||"")) || null;
+  studioRegisterAnim(select, playBtn);
+});
