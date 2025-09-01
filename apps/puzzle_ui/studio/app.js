@@ -1,9 +1,31 @@
-// ES-module imports from your Viewer libs
-import * as THREE from '../viewer/libs/three/three.module.js';
-import { OrbitControls }     from '../viewer/libs/three/examples/jsm/controls/OrbitControls.js';
+// ES-module imports from local Studio libs
+import * as THREE from './libs/three.module.js';
+import { OrbitControls }     from './libs/OrbitControls.js';
 
 // Optional: expose THREE if other code reads window.THREE
-window.THREE = THREE;
+window.THREE = window.THREE || THREE;
+
+// Robust cannon-es loader (caches + works with .js/.mjs and window.CANNON)
+let __cannonMod;
+async function loadCannon() {
+  if (__cannonMod) return __cannonMod;
+  const candidates = [
+    "./libs/cannon-es.js",
+    "../viewer/libs/cannon-es.js",
+    "./libs/cannon-es.mjs",
+    "../viewer/libs/cannon-es.mjs",
+  ];
+  for (const p of candidates) {
+    try {
+      const m = await import(p);
+      const C = m?.default ?? m;
+      if (C?.World) return (__cannonMod = C);
+    } catch {}
+  }
+  if (globalThis.CANNON?.World) return (__cannonMod = globalThis.CANNON);
+  studioStatus("cannon-es not found (put ESM at studio/libs/).", "error");
+  return null;
+}
 
 /* Studio viewer — isolated from main viewer. No file watcher. */
 let scene, camera, renderer, controls;
@@ -358,6 +380,17 @@ function init(){
   camera.up.set(0, 0, 1);  // Z-up for turntable feel (no roll)
   camera.position.set(8,8,8);
 
+  // Export core objects for external integrations / debugging
+  globalThis.STUDIO   = { scene, camera, renderer };
+  globalThis.scene    = scene;
+  globalThis.camera   = camera;
+  globalThis.renderer = renderer;
+  // Also export on window for explicit compatibility
+  window.STUDIO   = { scene, camera, renderer };
+  window.scene    = scene;
+  window.camera   = camera;
+  window.renderer = renderer;
+
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
@@ -463,18 +496,15 @@ function _stepAnimation() {
 }
 
 function animate(){
-  requestAnimationFrame(animate);
-  controls.update();
-  
-  // Add physics stepping before render
   const now = performance.now();
-  const dt = (now - (window.__studioPrev || now)) / 1000;
+  const dt  = (now - (window.__studioPrev || now)) / 1000;
   window.__studioPrev = now;
-  
-  window.studioAnimStep?.(dt);   // ← physics step call
-  
-  _stepAnimation();              // ← dispatch both kinds safely
+
+  controls.update();
+  window.studioAnimStep?.(dt);   // ← call the physics stepper
+  _stepAnimation();              // ← dispatch other Studio anims safely
   renderer.render(scene, camera);
+  requestAnimationFrame(animate);
 }
 
 // Step the camera around Z (XY plane) 0→360°, keeping distance and height constant
@@ -631,7 +661,10 @@ function buildSceneFromSnapshot(snapshot) {
     const g = new THREE.Group();
     g.name = p.id;
     if (isContainer) g.userData.isContainer = true;
-    else             g.userData.pieceKey   = p.material_key || p.id;
+    else {
+      g.userData.pieceKey = p.material_key || p.id;
+      g.userData.kind = 'piece';
+    }
 
     const mat = isContainer
       ? makeContainerMaterial(p.material_key || p.id)
@@ -648,7 +681,25 @@ function buildSceneFromSnapshot(snapshot) {
       min.min(v); max.max(v);  // bbox from oriented points
     }
 
-    if (!isContainer) addBondsForAtoms(g, atoms, mat);
+    // Tag local atom data for physics/analysis consumers
+    if (!isContainer) {
+      g.userData.atoms = atoms.map(s => s.position.clone()); // LOCAL offsets
+      g.userData.atomRadius = atomR;                          // visual radius in scene units
+
+      // Fallback inference if metadata missing or invalid (safety)
+      if (!Array.isArray(g.userData.atoms) || !g.userData.atoms.length || !Number.isFinite(g.userData.atomRadius)) {
+        const inferred = []; let r = null;
+        g.traverse(o => {
+          if (o.isMesh) {
+            inferred.push(o.position.clone());
+            if (o.geometry?.parameters?.radius && r == null) r = o.geometry.parameters.radius;
+          }
+        });
+        g.userData.atoms = inferred;
+        g.userData.atomRadius = r ?? 0.5;
+      }
+      addBondsForAtoms(g, atoms, mat);
+    }
     root.add(g);
   });
 
@@ -821,22 +872,133 @@ function setStudioOrientation(mode) {
   }
 };
 
-// NEW: add missing studioPlaySnuggle function and related physics functions
-async function studioPlaySnuggle(forceDurationSec = null) {
-  studioStatus("Snuggle: starting...");
-  
-  let duration = +forceDurationSec;
-  if (!Number.isFinite(duration) || duration <= 0) {
-    const input = prompt("Snuggle duration (seconds)?", "16");
-    duration = Math.max(1, parseFloat(input ?? "16"));
+// NEW: Physics preset — PD control with world→local safe write-back
+async function studioPlaySnuggle(durationSec = 12) {
+  // cancel previous if any
+  if (window.__anim) { window.__anim.active = false; window.__anim = null; }
+
+  const C = await loadCannon();
+  if (!C) return;
+
+  // scene + pieces
+  const scene = window.scene, camera = window.camera, renderer = window.renderer;
+  if (!scene || !camera || !renderer) { studioStatus("Studio scene not ready.", "error"); return; }
+
+  const groups = [];
+  scene.traverse(o => { if (o?.userData?.kind === "piece") groups.push(o); });
+  if (!groups.length) { studioStatus("No pieces in Studio.", "error"); return; }
+
+  // targets + ensure metadata
+  const targets = groups.map(g => {
+    const p = new THREE.Vector3(), q = new THREE.Quaternion();
+    g.getWorldPosition(p); g.getWorldQuaternion(q);
+    if (!Array.isArray(g.userData.atoms) || !g.userData.atoms.length || !Number.isFinite(g.userData.atomRadius)) {
+      const atoms = []; let r = null;
+      g.traverse(o => { if (o.isMesh) { atoms.push(o.position.clone()); if (o.geometry?.parameters?.radius && r == null) r = o.geometry.parameters.radius; }});
+      g.userData.atoms = atoms; g.userData.atomRadius = r ?? 0.5;
+    }
+    return { g, p, q, atoms: g.userData.atoms, r: g.userData.atomRadius };
+  });
+
+  // scatter ring around pivot (keep Z)
+  const pivot = targets.reduce((a,t)=>a.add(t.p), new THREE.Vector3()).multiplyScalar(1/targets.length);
+  let maxD = 0; for (const t of targets) maxD = Math.max(maxD, Math.hypot(t.p.x - pivot.x, t.p.y - pivot.y));
+  const SCATTER = 1.15, SHRINK = 0.97;
+  const R = SCATTER * (maxD + 3 * (targets[0].r || 0.5));
+
+  // physics world
+  const world = new C.World();
+  world.gravity.set(0,0,0);
+  world.defaultContactMaterial.friction = 0.5;
+  world.defaultContactMaterial.restitution = 0.0;
+
+  // bodies
+  const items = [];
+  for (let i=0;i<targets.length;i++){
+    const t = targets[i];
+    const b = new C.Body({ mass: 1 });
+    const shp = new C.Sphere(t.r * SHRINK);
+    for (const a of t.atoms) b.addShape(shp, new C.Vec3(a.x,a.y,a.z));
+    const ang = (i/targets.length) * Math.PI * 2;
+    b.position.set(pivot.x + R*Math.cos(ang), pivot.y + R*Math.sin(ang), t.p.z);
+    b.quaternion.set(t.q.x, t.q.y, t.q.z, t.q.w);
+    b.linearDamping = 0.2; b.angularDamping = 0.25;
+    world.addBody(b);
+    items.push({ group: t.g, targetPos: t.p, targetQuat: t.q, body: b, hold: 0, snapped: false });
   }
-  
-  studioStatus(`Snuggle: running for ${duration}s...`);
-  
-  // Simple placeholder animation
-  setTimeout(() => {
-    studioStatus("Snuggle: finished");
-  }, duration * 1000);
+
+  // PD stepper (KR/KW for rotation, KP/KD for position)
+  const KP=32, KD=8, KR=20, KW=6;
+  const FIXED_DT = 1/120, SUB=4;
+  const POS_OK=0.015, ANG_OK = 1.5*Math.PI/180, V_OK=0.02, W_OK=0.02, HOLD=0.35;
+
+  function quatErr(T,Q){ // shortest-arc
+    const ew=T.w*Q.w - T.x*Q.x - T.y*Q.y - T.z*Q.z;
+    const ex=T.w*Q.x + T.x*Q.w + T.y*Q.z - T.z*Q.y;
+    const ey=T.w*Q.y - T.x*Q.z + T.y*Q.w + T.z*Q.x;
+    const ez=T.w*Q.z + T.x*Q.y - T.y*Q.x + T.z*Q.w;
+    const s = ew < 0 ? -1 : 1; return {w:s*ew, x:s*ex, y:s*ey, z:s*ez};
+  }
+
+  window.__anim = { active:true, C, world, items, t:0, duration: Math.max(1, +durationSec || 12) };
+
+  window.studioAnimStep = function(dt=1/60){
+    const A = window.__anim; if (!A?.active) return;
+    const h = FIXED_DT / SUB;
+    for (let s=0;s<SUB;s++){
+      for (const it of A.items){
+        if (it.snapped) continue;
+        const b = it.body;
+        // position PD
+        const ex = it.targetPos.x - b.position.x;
+        const ey = it.targetPos.y - b.position.y;
+        const ez = it.targetPos.z - b.position.z;
+        b.force.x += b.mass*(KP*ex - KD*b.velocity.x);
+        b.force.y += b.mass*(KP*ey - KD*b.velocity.y);
+        b.force.z += b.mass*(KP*ez - KD*b.velocity.z);
+        // rotation PD (axis*angle)
+        const qe = quatErr(it.targetQuat, b.quaternion);
+        const w = Math.max(-1, Math.min(1, qe.w));
+        const ang = 2*Math.acos(w);
+        const sden = Math.sqrt(Math.max(1 - w*w, 0));
+        const rx = sden>1e-6 ? (qe.x/sden)*ang : 2*qe.x;
+        const ry = sden>1e-6 ? (qe.y/sden)*ang : 2*qe.y;
+        const rz = sden>1e-6 ? (qe.z/sden)*ang : 2*qe.z;
+        b.torque.x += KR*rx - KW*b.angularVelocity.x;
+        b.torque.y += KR*ry - KW*b.angularVelocity.y;
+        b.torque.z += KR*rz - KW*b.angularVelocity.z;
+
+        // stability & snap
+        const pOk = Math.hypot(ex,ey,ez) < POS_OK;
+        const aOk = ang < ANG_OK;
+        const vOk = b.velocity.length() < V_OK;
+        const wOk = b.angularVelocity.length() < W_OK;
+        it.hold = (pOk && aOk && vOk && wOk) ? it.hold + h : 0;
+        if (it.hold >= HOLD) {
+          b.velocity.scale(0, b.velocity); b.angularVelocity.scale(0, b.angularVelocity);
+          b.position.set(it.targetPos.x, it.targetPos.y, it.targetPos.z);
+          b.quaternion.set(it.targetQuat.x, it.targetQuat.y, it.targetQuat.z, it.targetQuat.w);
+          it.snapped = true;
+        }
+      }
+      world.step(FIXED_DT, h, 1);
+    }
+
+    // world → local write-back (handles parent transforms)
+    const v = new THREE.Vector3(), qw = new THREE.Quaternion(), qp = new THREE.Quaternion();
+    for (const it of A.items){
+      const b = it.body, g = it.group, p = g.parent;
+      if (!p) continue;
+      v.set(b.position.x, b.position.y, b.position.z);
+      p.worldToLocal(v); g.position.copy(v);
+      p.getWorldQuaternion(qp).invert();
+      qw.set(b.quaternion.x,b.quaternion.y,b.quaternion.z,b.quaternion.w).premultiply(qp);
+      g.quaternion.copy(qw);
+    }
+
+    A.t += dt;
+    if (A.items.every(i=>i.snapped) || A.t >= A.duration) A.active = false;
+  };
 }
 
 function studioAnimStep(dt) {
@@ -976,48 +1138,7 @@ window.addEventListener("DOMContentLoaded", () => {
   studioRegisterAnim(select, playBtn);
 });
 
-// Cannon loader
-async function loadCannon() {
-  const candidates = [
-    "./libs/cannon-es.js",
-    "../viewer/libs/cannon-es.js", 
-    "./libs/cannon-es.mjs",
-    "../viewer/libs/cannon-es.mjs"
-  ];
-  for (const p of candidates) {
-    try {
-      const mod = await import(p);
-      // Handle both default export and named exports
-      const C = mod?.default ?? mod;
-      // For named exports, create an object with the main classes
-      if (!C.World && mod.World) {
-        const namedExports = {
-          World: mod.World,
-          Body: mod.Body,
-          Vec3: mod.Vec3,
-          Quaternion: mod.Quaternion,
-          Sphere: mod.Sphere,
-          Box: mod.Box,
-          Material: mod.Material,
-          ContactMaterial: mod.ContactMaterial,
-          SAPBroadphase: mod.SAPBroadphase
-        };
-        log("Loaded cannon-es (named exports) from", p);
-        return namedExports;
-      }
-      if (C?.World && C?.Body && C?.Vec3) {
-        log("Loaded cannon-es from", p);
-        return C;
-      }
-    } catch (e) { /* try next */ }
-  }
-  if (globalThis.CANNON?.World) {
-    log("Using global CANNON fallback");
-    return globalThis.CANNON;
-  }
-  studioStatus("cannon-es not found. Copy cannon-es.js to studio/viewer libs.", "error");
-  return null;
-}
+// (loader moved near top)
 
 // ---- Export API to globals and to parent/top ----
 (function exportStudioAPI(win){
