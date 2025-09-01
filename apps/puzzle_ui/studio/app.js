@@ -465,6 +465,14 @@ function _stepAnimation() {
 function animate(){
   requestAnimationFrame(animate);
   controls.update();
+  
+  // Add physics stepping before render
+  const now = performance.now();
+  const dt = (now - (window.__studioPrev || now)) / 1000;
+  window.__studioPrev = now;
+  
+  window.studioAnimStep?.(dt);   // ← physics step call
+  
   _stepAnimation();              // ← dispatch both kinds safely
   renderer.render(scene, camera);
 }
@@ -967,3 +975,78 @@ window.addEventListener("DOMContentLoaded", () => {
   const playBtn = [...document.querySelectorAll("button")].find(b => /play/i.test(b.textContent||"")) || null;
   studioRegisterAnim(select, playBtn);
 });
+
+// Cannon loader
+async function loadCannon() {
+  const candidates = [
+    "./libs/cannon-es.js",
+    "../viewer/libs/cannon-es.js", 
+    "./libs/cannon-es.mjs",
+    "../viewer/libs/cannon-es.mjs"
+  ];
+  for (const p of candidates) {
+    try {
+      const mod = await import(p);
+      // Handle both default export and named exports
+      const C = mod?.default ?? mod;
+      // For named exports, create an object with the main classes
+      if (!C.World && mod.World) {
+        const namedExports = {
+          World: mod.World,
+          Body: mod.Body,
+          Vec3: mod.Vec3,
+          Quaternion: mod.Quaternion,
+          Sphere: mod.Sphere,
+          Box: mod.Box,
+          Material: mod.Material,
+          ContactMaterial: mod.ContactMaterial,
+          SAPBroadphase: mod.SAPBroadphase
+        };
+        log("Loaded cannon-es (named exports) from", p);
+        return namedExports;
+      }
+      if (C?.World && C?.Body && C?.Vec3) {
+        log("Loaded cannon-es from", p);
+        return C;
+      }
+    } catch (e) { /* try next */ }
+  }
+  if (globalThis.CANNON?.World) {
+    log("Using global CANNON fallback");
+    return globalThis.CANNON;
+  }
+  studioStatus("cannon-es not found. Copy cannon-es.js to studio/viewer libs.", "error");
+  return null;
+}
+
+// ---- Export API to globals and to parent/top ----
+(function exportStudioAPI(win){
+  try {
+    // Export to current window first
+    if (typeof studioPlaySnuggle === "function") win.studioPlaySnuggle = studioPlaySnuggle;
+    if (typeof studioAnimStep === "function") win.studioAnimStep = studioAnimStep;
+    if (typeof studioOnSceneReset === "function") win.studioOnSceneReset = studioOnSceneReset;
+    if (typeof studioOnOrientationChange === "function") win.studioOnOrientationChange = studioOnOrientationChange;
+    if (typeof cancelAnim === "function") win.studioCancelAnim = cancelAnim;
+    
+    // Also add to globalThis for extra safety
+    globalThis.studioPlaySnuggle = win.studioPlaySnuggle;
+    globalThis.studioAnimStep = win.studioAnimStep;
+    globalThis.studioOnSceneReset = win.studioOnSceneReset;
+    globalThis.studioOnOrientationChange = win.studioOnOrientationChange;
+    globalThis.studioCancelAnim = win.studioCancelAnim;
+  } catch {}
+
+  const targets = [win.parent !== win ? win.parent : null, win.top !== win ? win.top : null];
+  for (const t of targets) {
+    if (!t) continue;
+    try {
+      if (win.studioPlaySnuggle)         t.studioPlaySnuggle = win.studioPlaySnuggle;
+      if (win.studioAnimStep)            t.studioAnimStep = win.studioAnimStep;
+      if (win.studioOnSceneReset)        t.studioOnSceneReset = win.studioOnSceneReset;
+      if (win.studioOnOrientationChange) t.studioOnOrientationChange = win.studioOnOrientationChange;
+      if (win.studioCancelAnim)          t.studioCancelAnim = win.studioCancelAnim;
+    } catch {}
+  }
+  studioStatus("Snuggle API exported.");
+})(window);
