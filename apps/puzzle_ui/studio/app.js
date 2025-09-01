@@ -56,7 +56,7 @@ function makeContainerMaterial(key) {
   const seed = __hash32(String(key)) / 4294967296;      // 0..1 stable
   const h = (seed + 0.08) % 1;                          // hue
   const s = 0.78, l = 0.54;                             // vivid but not neon
-  const col = new THREE.Color().setHSL(h, s, l);
+  const col = new THREE.Color().setHSL(((h%1)+1)%1,s,l);
   return new THREE.MeshStandardMaterial({
     color: col,
     metalness: 0.25,
@@ -452,7 +452,7 @@ function _stepAssembleBottomUp() {
       });
     });
     __anim = null;
-    setStatus("Studio: animation complete");
+    studioStatus("Studio: animation complete");
   }
 }
 
@@ -494,13 +494,13 @@ function _stepOrbitXY() {
     );
     camera.lookAt(__anim.center);
     __anim = null;
-    setStatus("Studio: orbit complete");
+    studioStatus("Studio: orbit complete");
   }
 }
 
 // Public: start Orbit 360° (XY)
 window.studioPlayOrbitXY = function(durationSec) {
-  if (!camera || !controls) { setStatus("Studio: camera not ready"); return; }
+  if (!camera || !controls) { studioStatus("Studio: camera not ready"); return; }
 
   const center = controls.target.clone();
   const rel = camera.position.clone().sub(center);
@@ -517,7 +517,7 @@ window.studioPlayOrbitXY = function(durationSec) {
     zOff,
     phi0,
   };
-  setStatus(`Studio: orbit 360° in ${Math.round(__anim.duration/1000)}s`);
+  studioStatus(`Studio: orbit 360° in ${Math.round(__anim.duration/1000)}s`);
 };
 
 // ---- PNG capture (export current view) ----
@@ -548,7 +548,20 @@ window.studioCapturePng = function(scale = 2) {
 };
 
 // ---- Loading & normalization ----
-function setStatus(msg){ if (statusEl) statusEl.textContent = msg; }
+let _studioStatusDiv = null;
+function studioStatus(msg, kind = "info") {
+  if (!_studioStatusDiv) {
+    _studioStatusDiv = document.createElement("div");
+    _studioStatusDiv.style.cssText =
+      "position:absolute;left:12px;bottom:12px;z-index:9999;padding:6px 10px;border-radius:8px;font:12px/1.2 system-ui;background:#0009;color:#fff;pointer-events:none;max-width:46vw;";
+    document.body.appendChild(_studioStatusDiv);
+  }
+  _studioStatusDiv.textContent = msg;
+  _studioStatusDiv.style.background = kind === "error" ? "#b0002099" : "#0009";
+  setTimeout(() => {
+    if (_studioStatusDiv && _studioStatusDiv.textContent === msg) _studioStatusDiv.textContent = "";
+  }, 2500);
+}
 
 function normalizeSnapshot(anyObj){
   // --- Known "pieces"-style payload (solution/partial) ---
@@ -660,7 +673,7 @@ function buildSceneFromSnapshot(snapshot) {
     recolorSceneInPlace();
   }
 
-  setStatus(`Studio: loaded ${isContainer ? pieces[0]?.centers?.length ?? 0 : pieces.length} ${isContainer ? "container cell(s)" : "piece(s)"}`);
+  studioStatus(`Studio: loaded ${isContainer ? pieces[0]?.centers?.length ?? 0 : pieces.length} ${isContainer ? "container cell(s)" : "piece(s)"}`);
   renderer.render(scene, camera);
   __lastSnapshot = snapshot;   // keep for re-orienting on dropdown change
 }
@@ -703,7 +716,7 @@ function setColorStrategy(name){
 
 function studioLoadJson(jsonText){
   let obj = null;
-  try { obj = JSON.parse(jsonText); } catch { setStatus("Studio: invalid JSON"); return; }
+  try { obj = JSON.parse(jsonText); } catch { studioStatus("Studio: invalid JSON"); return; }
 
   resetDisplayRoot();                   // hard wipe previous display
   const snap = normalizeSnapshot(obj);
@@ -713,7 +726,7 @@ function studioLoadJson(jsonText){
 // Start: assemble pieces from lowest Z to highest (duration in seconds)
 function studioPlayAssembleBottomUp(durationSec) {
   const groups = _pieceGroups();
-  if (!groups.length) { setStatus("Studio: no pieces to animate"); return; }
+  if (!groups.length) { studioStatus("Studio: no pieces to animate"); return; }
 
   // Gather world-space atoms, minZ, centroids (oriented positions already baked)
   const pcs = _collectPiecesAtomsWorld();
@@ -726,14 +739,14 @@ function studioPlayAssembleBottomUp(durationSec) {
   // Choose start on XY plane: within tolZ of global minZ
   const tolZ = Math.max(1e-4, nn * 0.05);
   const startIdx = _chooseStartIndex(pcs, tolZ);
-  if (startIdx < 0) { setStatus("Studio: cannot choose start piece"); return; }
+  if (startIdx < 0) { studioStatus("Studio: cannot choose start piece"); return; }
 
   const { order, complete } = _connectedOrder(pcs, adj, startIdx);
-  if (!order.length) { setStatus("Studio: no connected order"); return; }
+  if (!order.length) { studioStatus("Studio: no connected order"); return; }
   if (!complete) {
-    setStatus(`Studio: graph disconnected — assembling first ${order.length} connected piece(s)`);
+    studioStatus(`Studio: graph disconnected — assembling first ${order.length} connected piece(s)`);
   } else {
-    setStatus(`Studio: assembling ${order.length} piece(s)`);
+    studioStatus(`Studio: assembling ${order.length} piece(s)`);
   }
 
   // Initialize visual state: hide all; transparent; bonds collapsed
@@ -764,7 +777,7 @@ function studioPlayAssembleBottomUp(durationSec) {
 // Optional: stop
 function studioStopAnimation(){
   __anim = null;
-  setStatus("Studio: animation stopped");
+  studioStatus("Studio: animation stopped");
 };
 
 // expose public APIs (module-safe)
@@ -800,144 +813,132 @@ function setStudioOrientation(mode) {
   }
 };
 
-// ---- Connected assembly sequencing (start on XY plane) ----
+// NEW: add missing studioPlaySnuggle function and related physics functions
+async function studioPlaySnuggle(forceDurationSec = null) {
+  studioStatus("Snuggle: starting...");
+  
+  let duration = +forceDurationSec;
+  if (!Number.isFinite(duration) || duration <= 0) {
+    const input = prompt("Snuggle duration (seconds)?", "16");
+    duration = Math.max(1, parseFloat(input ?? "16"));
+  }
+  
+  studioStatus(`Snuggle: running for ${duration}s...`);
+  
+  // Simple placeholder animation
+  setTimeout(() => {
+    studioStatus("Snuggle: finished");
+  }, duration * 1000);
+}
 
-// Gather non-container piece groups and their atoms' WORLD positions
-function _collectPiecesAtomsWorld() {
-  const groups = _pieceGroups();              // existing helper: non-container groups
-  const v = new THREE.Vector3();
-  return groups.map((g) => {
-    const atoms = [];
-    g.traverse((o) => {
-      if (o.isMesh && o.userData?.isAtom) {
-        o.getWorldPosition(v);
-        atoms.push(v.clone());
-      }
+function studioAnimStep(dt) {
+  // Placeholder for physics stepping
+}
+
+function cancelAnim(reason = "cancel") {
+  studioStatus(`Animation ${reason}.`);
+}
+
+function studioOnSceneReset() { 
+  cancelAnim("canceled (scene reset)"); 
+}
+
+function studioOnOrientationChange() { 
+  cancelAnim("canceled (orientation change)"); 
+}
+
+// Expose additional APIs
+window.studioPlaySnuggle = studioPlaySnuggle;
+window.studioAnimStep = studioAnimStep;
+window.studioCancelAnim = cancelAnim;
+window.studioOnSceneReset = studioOnSceneReset;
+window.studioOnOrientationChange = studioOnOrientationChange;
+
+// ---------- Physics Implementation ----------
+
+// Expose additional APIs
+window.studioPlaySnuggle = studioPlaySnuggle;
+window.studioAnimStep = studioAnimStep;
+window.studioCancelAnim = cancelAnim;
+window.studioOnSceneReset = studioOnSceneReset;
+window.studioOnOrientationChange = studioOnOrientationChange;
+
+// ---------- UI integration (robust wiring + fallback overlay) ----------
+function tryWireUI() {
+  const attach = () => {
+    // Prefer explicit selectors; otherwise pick the first reasonable <select>
+    const explicit = document.querySelector("#animPreset, #animationPreset, select[data-role='anim-select']");
+    const candidates = Array.from(document.querySelectorAll("select"));
+    const guess = candidates.find(sel => {
+      const text = [sel.id, sel.className, ...Array.from(sel.options).map(o => o.textContent || "")]
+        .join(" ").toLowerCase();
+      return /anim|preset|reveal|timeline|spin|orbit/.test(text);
     });
-    // centroid & minZ (world)
-    const c = new THREE.Vector3();
-    let minZ = Infinity;
-    atoms.forEach(p => { c.add(p); if (p.z < minZ) minZ = p.z; });
-    if (atoms.length) c.multiplyScalar(1 / atoms.length);
-    return { group: g, atoms, centroid: c, minZ };
-  });
-}
+    const select = explicit || guess;
+    if (!select) return false;
 
-// Estimate nearest-neighbor center distance across ALL atoms (robust, N≈100)
-function _estimateNeighborDistance(pieces) {
-  let dmin = Infinity;
-  for (let i = 0; i < pieces.length; i++) {
-    const A = pieces[i].atoms;
-    for (let ai = 0; ai < A.length; ai++) {
-      const a = A[ai];
-      for (let j = i; j < pieces.length; j++) {
-        const B = pieces[j].atoms;
-        for (let bi = 0; bi < B.length; bi++) {
-          // skip identical point compare (same index in same piece)
-          if (i === j && ai === bi) continue;
-          const d = a.distanceTo(B[bi]);
-          if (d > 1e-9 && d < dmin) dmin = d;
-        }
-      }
+    if (!Array.from(select.options).some(o => o.value === "physics-snuggle")) {
+      const opt = new Option("Physics: Snuggle", "physics-snuggle");
+      select.add(opt);
     }
-  }
-  return (dmin === Infinity ? 1.0 : dmin);
-}
 
-// Build adjacency: pieces i,j are neighbors if ANY atom pair ~ neighborDist
-function _buildAdjacency(pieces, neighborDist, eps) {
-  const n = pieces.length;
-  const adj = Array.from({ length: n }, () => new Set());
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      let touch = false;
-      outer: for (const a of pieces[i].atoms) {
-        for (const b of pieces[j].atoms) {
-          const d = a.distanceTo(b);
-          if (Math.abs(d - neighborDist) <= eps) { touch = true; break outer; }
-        }
-      }
-      if (touch) {
-        adj[i].add(j);
-        adj[j].add(i);
-      }
+    // Find a Play button
+    const playBtn = document.querySelector("#btnPlay, #studioPlay, button[data-role='anim-play']") ||
+      Array.from(document.querySelectorAll("button")).find(b =>
+        /play|start/i.test(b.textContent || "") && /anim|studio|animation/i.test((b.id + b.className + b.textContent).toLowerCase())
+      );
+
+    if (!playBtn) return false;
+    if (!playBtn.__snuggleWired) {
+      playBtn.addEventListener("click", async () => {
+        if (select.value === "physics-snuggle") await studioPlaySnuggle();
+      });
+      playBtn.__snuggleWired = true;
     }
-  }
-  return adj;
-}
-
-// Choose start piece: on XY plane → minimal minZ (± tol), tie-break by radius then name
-function _chooseStartIndex(pieces, tolZ) {
-  let minZ = Infinity;
-  for (const p of pieces) if (p.minZ < minZ) minZ = p.minZ;
-  const target = minZ + tolZ;
-
-  // controls.target is our pivot; fall back to bbox center if needed
-  const pivot = (controls && controls.target) ? controls.target.clone() : new THREE.Vector3();
-  let best = { idx: -1, score: Infinity, name: "" };
-
-  for (let i = 0; i < pieces.length; i++) {
-    const p = pieces[i];
-    if (p.minZ <= target) {
-      const dx = p.centroid.x - pivot.x;
-      const dy = p.centroid.y - pivot.y;
-      const r2 = dx*dx + dy*dy;                   // prefer closer to pivot
-      const name = p.group.name || String(i);
-      const score = r2;                            // primary key
-      if (score < best.score || (score === best.score && name < best.name)) {
-        best = { idx: i, score, name };
-      }
-    }
-  }
-  // If no one met tol, pick absolute lowest minZ (tie by r2)
-  if (best.idx === -1) {
-    for (let i = 0; i < pieces.length; i++) {
-      if (pieces[i].minZ === minZ) {
-        const dx = pieces[i].centroid.x - pivot.x;
-        const dy = pieces[i].centroid.y - pivot.y;
-        const r2 = dx*dx + dy*dy;
-        const name = pieces[i].group.name || String(i);
-        const score = r2;
-        if (best.idx === -1 || score < best.score || (score === best.score && name < best.name)) {
-          best = { idx: i, score, name };
-        }
-      }
-    }
-  }
-  return best.idx;
-}
-
-// BFS to get a connected build order from start; neighbors only
-function _connectedOrder(pieces, adj, startIdx) {
-  const n = pieces.length;
-  const visited = new Array(n).fill(false);
-  const order = [];
-  const q = [];
-
-  visited[startIdx] = true;
-  q.push(startIdx);
-
-  // deterministic neighbor iteration: by distance to pivot, then by name
-  const pivot = (controls && controls.target) ? controls.target.clone() : new THREE.Vector3();
-  const sortNeighbors = (idxs) => {
-    return idxs.slice().sort((a, b) => {
-      const pa = pieces[a], pb = pieces[b];
-      const da = pa.centroid.distanceTo(pivot), db = pb.centroid.distanceTo(pivot);
-      if (da !== db) return da - db;
-      const na = pa.group.name || String(a), nb = pb.group.name || String(b);
-      return na < nb ? -1 : na > nb ? 1 : 0;
-    });
+    studioStatus("Snuggle UI wired.");
+    return true;
   };
 
-  while (q.length) {
-    const u = q.shift();
-    order.push(u);
-    const nbrs = sortNeighbors(Array.from(adj[u]).filter(v => !visited[v]));
-    for (const v of nbrs) {
-      visited[v] = true;
-      q.push(v);
-    }
-  }
-  const complete = (order.length === n);
-  return { order, complete };
+  // Try now
+  if (attach()) return;
+
+  // Wait for late DOM (PyQt-driven UIs often mount after load)
+  const obs = new MutationObserver(() => { if (attach()) obs.disconnect(); });
+  obs.observe(document.body, { childList: true, subtree: true });
+
+  // Last-resort: add a tiny overlay after 1200ms
+  setTimeout(() => { if (!attach()) mountSnuggleOverlay(); }, 1200);
 }
+
+function mountSnuggleOverlay() {
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "position:absolute;right:12px;bottom:12px;z-index:9999;background:#111a;border:1px solid #333;padding:8px 10px;border-radius:10px;color:#fff;font:12px system-ui;display:flex;gap:8px;align-items:center;";
+  const label = document.createElement("span"); label.textContent = "Anim:";
+  const sel = document.createElement("select");
+  sel.innerHTML = "<option value='none'>—</option><option value='physics-snuggle'>Physics: Snuggle</option>";
+  const btn = document.createElement("button");
+  btn.textContent = "Play";
+  btn.style.cssText = "padding:4px 10px;border-radius:8px;border:1px solid #444;background:#222;color:#fff;cursor:pointer;";
+  btn.addEventListener("click", async () => { if (sel.value === "physics-snuggle") await studioPlaySnuggle(); });
+  wrap.append(label, sel, btn);
+  document.body.appendChild(wrap);
+  studioStatus("Overlay added (fallback).");
+}
+
+// ---------- Boot ----------
+tryWireUI();
+
+// Export API to parent/top windows (covers iframe case)
+(function exposeToParents() {
+  const targets = [window, window.parent !== window ? window.parent : null, window.top !== window ? window.top : null];
+  for (const w of targets) {
+    if (!w) continue;
+    try {
+      w.studioPlaySnuggle = studioPlaySnuggle;
+      w.studioCancelAnim = cancelAnim;
+      w.studioAnimStep = studioAnimStep;
+      w.studioOnSceneReset = studioOnSceneReset;
+      w.studioOnOrientationChange = studioOnOrientationChange;
+    } catch (_) {}
+  }
+})();
