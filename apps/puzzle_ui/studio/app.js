@@ -1322,8 +1322,8 @@ async function studioPlaySnuggleWithConfig(cfg = null) {
         b.force.y += KP * ey - KD * b.velocity.y;
         b.force.z += KP * ez - KD * b.velocity.z;
         
-        // PD rotation control
-        const qe = new THREE.Quaternion().multiplyQuaternions(it.targetQuat, b.quaternion.clone().invert());
+        // PD rotation control (use same quatErr as original)
+        const qe = quatErr(it.targetQuat, b.quaternion);
         const w = Math.abs(qe.w);
         const ang = 2*Math.acos(w);
         const sden = Math.sqrt(Math.max(1 - w*w, 0));
