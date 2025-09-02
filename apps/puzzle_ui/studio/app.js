@@ -1171,3 +1171,41 @@ window.addEventListener("DOMContentLoaded", () => {
   }
   studioStatus("Snuggle API exported.");
 })(window);
+
+// Make the panel callable from the Console and from parent UIs
+window.openSnuggleDialog  = window.openSnuggleDialog  || openSnuggleDialog;
+window.studioPlaySnuggle  = window.studioPlaySnuggle  || studioPlaySnuggle;
+
+// Make sure the Play button actually opens the panel (late-mount safe)
+(function ensureSnuggleUI(){
+  function attach(){
+    const select =
+      document.querySelector('#animPreset, #animationPreset, select[data-role="anim-select"]')
+      || document.querySelector('select');
+
+    const play =
+      document.querySelector('#btnPlay, #studioPlay, button[data-role="anim-play"]')
+      || [...document.querySelectorAll('button')].find(b => /play/i.test(b.textContent||''));
+
+    if (!select || !play) return false;
+
+    if (![...select.options].some(o => o.value === 'physics-snuggle')) {
+      select.add(new Option('Physics: Snuggle', 'physics-snuggle'));
+    }
+    if (!play.__snugWired){
+      play.addEventListener('click', (e) => {
+        if (select.value === 'physics-snuggle') {
+          e.preventDefault(); e.stopPropagation();
+          window.openSnuggleDialog();
+        }
+      });
+      play.__snugWired = true;
+    }
+    return true;
+  }
+
+  if (!attach()){
+    const obs = new MutationObserver(() => { if (attach()) obs.disconnect(); });
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+})();
