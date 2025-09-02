@@ -11,6 +11,7 @@ class StudioTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("StudioTab")
+        self.last_open_dir = ""  # Track last opened directory
 
         # --- Top controls row (Open + Color Strategy + Brightness)
         row = QHBoxLayout()
@@ -122,11 +123,17 @@ class StudioTab(QWidget):
         self.btnPlay.clicked.connect(self._on_play_anim)
 
     def _on_open(self):
+        # Use last directory or default to current directory
+        start_dir = self.last_open_dir if self.last_open_dir else ""
+        
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open geometry JSON", "", "JSON files (*.json);;All files (*)"
+            self, "Open geometry JSON", start_dir, "JSON files (*.json);;All files (*)"
         )
         if not path:
             return
+        
+        # Remember the directory for next time
+        self.last_open_dir = os.path.dirname(path)
         try:
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()

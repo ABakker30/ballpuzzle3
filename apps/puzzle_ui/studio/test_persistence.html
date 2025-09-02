@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Persistence</title>
+</head>
+<body>
+    <h2>Test localStorage Persistence</h2>
+    <button onclick="testSave()">Save Test Data</button>
+    <button onclick="testLoad()">Load Test Data</button>
+    <button onclick="testClear()">Clear Test Data</button>
+    <div id="output"></div>
+
+    <script>
+        const SNUG_KEY = "studio.snuggle.cfg.v1";
+        
+        function testSave() {
+            const testData = {
+                durationSec: 99,
+                KP: 123,
+                KD: 456,
+                testField: "persistence_test"
+            };
+            console.log('Saving test data:', testData);
+            localStorage.setItem(SNUG_KEY, JSON.stringify(testData));
+            document.getElementById('output').innerHTML = 'Saved: ' + JSON.stringify(testData);
+        }
+        
+        function testLoad() {
+            const saved = localStorage.getItem(SNUG_KEY);
+            console.log('Loading test data:', saved);
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                console.log('Parsed:', parsed);
+                document.getElementById('output').innerHTML = 'Loaded: ' + JSON.stringify(parsed);
+            } else {
+                document.getElementById('output').innerHTML = 'No saved data found';
+            }
+        }
+        
+        function testClear() {
+            localStorage.removeItem(SNUG_KEY);
+            document.getElementById('output').innerHTML = 'Cleared localStorage';
+        }
+        
+        // Auto-load on page load
+        window.onload = testLoad;
+    </script>
+</body>
+</html>

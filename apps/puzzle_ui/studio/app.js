@@ -1017,17 +1017,8 @@ function studioOnOrientationChange() {
   cancelAnim("canceled (orientation change)"); 
 }
 
-// Expose additional APIs
-window.studioPlaySnuggle = studioPlaySnuggle;
-window.studioAnimStep = studioAnimStep;
-window.studioCancelAnim = cancelAnim;
-window.studioOnSceneReset = studioOnSceneReset;
-window.studioOnOrientationChange = studioOnOrientationChange;
-
-// ---------- Physics Implementation ----------
-
-// Expose additional APIs
-window.studioPlaySnuggle = studioPlaySnuggle;
+// Expose additional APIs - use the configurable version as default
+window.studioPlaySnuggle = () => studioPlaySnuggleWithConfig();
 window.studioAnimStep = studioAnimStep;
 window.studioCancelAnim = cancelAnim;
 window.studioOnSceneReset = studioOnSceneReset;
@@ -1060,8 +1051,15 @@ function tryWireUI() {
 
     if (!playBtn) return false;
     if (!playBtn.__snuggleWired) {
-      playBtn.addEventListener("click", async () => {
-        if (select.value === "physics-snuggle") await studioPlaySnuggle();
+      playBtn.addEventListener("click", (e) => {
+        if (select.value === "physics-snuggle") {
+          e.preventDefault(); e.stopPropagation();
+          if (!playBtn.__dialogOpen) {
+            playBtn.__dialogOpen = true;
+            window.openSnuggleDialog();
+            setTimeout(() => { playBtn.__dialogOpen = false; }, 100);
+          }
+        }
       });
       playBtn.__snuggleWired = true;
     }
@@ -1089,7 +1087,16 @@ function mountSnuggleOverlay() {
   const btn = document.createElement("button");
   btn.textContent = "Play";
   btn.style.cssText = "padding:4px 10px;border-radius:8px;border:1px solid #444;background:#222;color:#fff;cursor:pointer;";
-  btn.addEventListener("click", async () => { if (sel.value === "physics-snuggle") await studioPlaySnuggle(); });
+  btn.addEventListener("click", (e) => { 
+    if (sel.value === "physics-snuggle") {
+      e.preventDefault(); e.stopPropagation();
+      if (!btn.__dialogOpen) {
+        btn.__dialogOpen = true;
+        window.openSnuggleDialog();
+        setTimeout(() => { btn.__dialogOpen = false; }, 100);
+      }
+    }
+  });
   wrap.append(label, sel, btn);
   document.body.appendChild(wrap);
   studioStatus("Overlay added (fallback).");
@@ -1104,7 +1111,17 @@ const SNUG_KEY = "studio.snuggle.cfg.v1";
 
 function getSnuggleDefaults() {
   const saved = localStorage.getItem(SNUG_KEY);
-  if (saved) { try { return JSON.parse(saved); } catch {} }
+  console.log('Loading settings from localStorage:', saved);
+  if (saved) { 
+    try { 
+      const parsed = JSON.parse(saved);
+      console.log('Parsed saved settings:', parsed);
+      return parsed;
+    } catch (e) {
+      console.log('Failed to parse saved settings:', e);
+    }
+  }
+  console.log('Using default settings');
   return {
     durationSec: 16,
     // PD gains (slightly higher damping/gains)
@@ -1126,6 +1143,7 @@ function getSnuggleDefaults() {
 
 function openSnuggleDialog() {
   const cfg = getSnuggleDefaults();
+  console.log('Opening dialog with config:', cfg);
   
   // Create modal backdrop
   const backdrop = document.createElement('div');
@@ -1135,40 +1153,41 @@ function openSnuggleDialog() {
   const modal = document.createElement('div');
   modal.style.cssText = 'background:#2a2a2a;border-radius:12px;padding:24px;max-width:500px;width:90%;color:#fff;font:14px/1.4 system-ui;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
   
+  // Create form elements dynamically to ensure proper value binding
   modal.innerHTML = `
     <h3 style="margin:0 0 20px 0;color:#4a9eff;">Physics: Snuggle Settings</h3>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
       <div>
         <label style="display:block;margin-bottom:8px;font-weight:500;">Duration (sec)</label>
-        <input type="number" id="snug-duration" value="${cfg.durationSec}" min="1" max="60" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+        <input type="number" id="snug-duration" min="1" max="60" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
       </div>
       <div>
         <label style="display:block;margin-bottom:8px;font-weight:500;">Scatter Factor</label>
-        <input type="number" id="snug-scatter" value="${cfg.SCATTER}" min="1.0" max="2.0" step="0.05" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+        <input type="number" id="snug-scatter" min="1.0" max="2.0" step="0.05" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
       </div>
       <div>
         <label style="display:block;margin-bottom:8px;font-weight:500;">Position KP</label>
-        <input type="number" id="snug-kp" value="${cfg.KP}" min="1" max="100" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+        <input type="number" id="snug-kp" min="1" max="100" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
       </div>
       <div>
         <label style="display:block;margin-bottom:8px;font-weight:500;">Position KD</label>
-        <input type="number" id="snug-kd" value="${cfg.KD}" min="1" max="50" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+        <input type="number" id="snug-kd" min="1" max="50" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
       </div>
       <div>
         <label style="display:block;margin-bottom:8px;font-weight:500;">Rotation KR</label>
-        <input type="number" id="snug-kr" value="${cfg.KR}" min="1" max="100" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+        <input type="number" id="snug-kr" min="1" max="100" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
       </div>
       <div>
         <label style="display:block;margin-bottom:8px;font-weight:500;">Rotation KW</label>
-        <input type="number" id="snug-kw" value="${cfg.KW}" min="1" max="50" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+        <input type="number" id="snug-kw" min="1" max="50" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
       </div>
       <div>
         <label style="display:block;margin-bottom:8px;font-weight:500;">Contact Stiffness</label>
-        <input type="number" id="snug-contact-stiff" value="${cfg.CONTACT_STIFF}" min="1e6" max="1e8" step="1e6" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+        <input type="number" id="snug-contact-stiff" min="1e6" max="1e8" step="1e6" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
       </div>
       <div>
         <label style="display:block;margin-bottom:8px;font-weight:500;">Friction</label>
-        <input type="number" id="snug-friction" value="${cfg.FRICTION}" min="0" max="1" step="0.1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+        <input type="number" id="snug-friction" min="0" max="1" step="0.1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
       </div>
     </div>
     <div style="display:flex;gap:12px;margin-top:24px;justify-content:flex-end;">
@@ -1181,12 +1200,23 @@ function openSnuggleDialog() {
   backdrop.appendChild(modal);
   document.body.appendChild(backdrop);
   
+  // Set values after DOM insertion to ensure proper binding
+  modal.querySelector('#snug-duration').value = cfg.durationSec;
+  modal.querySelector('#snug-scatter').value = cfg.SCATTER;
+  modal.querySelector('#snug-kp').value = cfg.KP;
+  modal.querySelector('#snug-kd').value = cfg.KD;
+  modal.querySelector('#snug-kr').value = cfg.KR;
+  modal.querySelector('#snug-kw').value = cfg.KW;
+  modal.querySelector('#snug-contact-stiff').value = cfg.CONTACT_STIFF;
+  modal.querySelector('#snug-friction').value = cfg.FRICTION;
+  
   // Event handlers
   const resetBtn = modal.querySelector('#snug-reset');
   const cancelBtn = modal.querySelector('#snug-cancel');
   const runBtn = modal.querySelector('#snug-run');
   
   resetBtn.addEventListener('click', () => {
+    console.log('Resetting settings - removing from localStorage');
     localStorage.removeItem(SNUG_KEY);
     const defaults = getSnuggleDefaults();
     modal.querySelector('#snug-duration').value = defaults.durationSec;
@@ -1204,23 +1234,43 @@ function openSnuggleDialog() {
     document.body.removeChild(backdrop);
   });
   
-  runBtn.addEventListener('click', () => {
-    // Collect settings
+  runBtn.addEventListener('click', (e) => {
+    // Prevent multiple clicks
+    if (runBtn.disabled) return;
+    runBtn.disabled = true;
+    runBtn.textContent = 'Running...';
+    
+    // Collect settings - only form values, no spreading of defaults
     const settings = {
-      durationSec: +modal.querySelector('#snug-duration').value,
-      SCATTER: +modal.querySelector('#snug-scatter').value,
-      KP: +modal.querySelector('#snug-kp').value,
-      KD: +modal.querySelector('#snug-kd').value,
-      KR: +modal.querySelector('#snug-kr').value,
-      KW: +modal.querySelector('#snug-kw').value,
-      CONTACT_STIFF: +modal.querySelector('#snug-contact-stiff').value,
-      FRICTION: +modal.querySelector('#snug-friction').value,
-      // Keep other defaults
-      ...getSnuggleDefaults(),
+      durationSec: +modal.querySelector('#snug-duration').value || 16,
+      SCATTER: +modal.querySelector('#snug-scatter').value || 1.20,
+      KP: +modal.querySelector('#snug-kp').value || 32,
+      KD: +modal.querySelector('#snug-kd').value || 10,
+      KR: +modal.querySelector('#snug-kr').value || 24,
+      KW: +modal.querySelector('#snug-kw').value || 8,
+      CONTACT_STIFF: +modal.querySelector('#snug-contact-stiff').value || 3e7,
+      FRICTION: +modal.querySelector('#snug-friction').value || 0.6,
+      // Add other required defaults that aren't in the form
+      FIXED_DT: 1/120,
+      SUBSTEPS: 4,
+      RESTITUTION: 0.0,
+      CONTACT_RELAX: 2.0,
+      FRICTION_STIFF: 3e7,
+      FRICTION_RELAX: 2.0,
+      COLLIDER_SHRINK: 0.965,
+      STABLE_POS: 0.02,
+      STABLE_ANG_DEG: 2.0,
+      STABLE_LIN: 0.02,
+      STABLE_ANG: 0.02,
+      STABLE_HOLD: 0.30
     };
+    
+    // Debug: log collected settings
+    console.log('Settings from panel (clean):', settings);
     
     // Save to localStorage
     localStorage.setItem(SNUG_KEY, JSON.stringify(settings));
+    console.log('Saved to localStorage');
     
     // Close modal
     document.body.removeChild(backdrop);
@@ -1238,7 +1288,14 @@ function openSnuggleDialog() {
 }
 
 async function studioPlaySnuggleWithConfig(cfg = null) {
+  console.log('studioPlaySnuggleWithConfig called with cfg:', cfg);
   const config = cfg || getSnuggleDefaults();
+  
+  // Debug: log the actual config being used
+  console.log('Final Snuggle Config being used:', config);
+  
+  // Visual confirmation of key parameters
+  studioStatus(`Physics: KP=${config.KP}, KD=${config.KD}, KR=${config.KR}, Duration=${config.durationSec}s`);
   
   // cancel previous if any
   if (window.__anim) { window.__anim.active = false; window.__anim = null; }
@@ -1356,7 +1413,7 @@ async function studioPlaySnuggleWithConfig(cfg = null) {
           it.snapped = true;
         }
       }
-      world.step(FIXED_DT, h, 1);
+      world.step(config.FIXED_DT, h, 1);
     }
     
     // world → local write-back (handles parent transforms)
@@ -1382,7 +1439,7 @@ async function studioPlaySnuggleWithConfig(cfg = null) {
   for (const w of targets) {
     if (!w) continue;
     try {
-      w.studioPlaySnuggle = studioPlaySnuggle;
+      w.studioPlaySnuggle = () => studioPlaySnuggleWithConfig();
       w.studioCancelAnim = cancelAnim;
       w.studioAnimStep = studioAnimStep;
       w.studioOnSceneReset = studioOnSceneReset;
@@ -1398,8 +1455,15 @@ function studioRegisterAnim(selectEl, playBtn){
     selectEl.add(new Option("Physics: Snuggle", "physics-snuggle"));
   }
   if (!playBtn.__snuggleWired){
-    playBtn.addEventListener("click", async () => {
-      if (selectEl.value === "physics-snuggle") await studioPlaySnuggle();
+    playBtn.addEventListener("click", (e) => {
+      if (selectEl.value === "physics-snuggle") {
+        e.preventDefault(); e.stopPropagation();
+        if (!playBtn.__dialogOpen) {
+          playBtn.__dialogOpen = true;
+          window.openSnuggleDialog();
+          setTimeout(() => { playBtn.__dialogOpen = false; }, 100);
+        }
+      }
     });
     playBtn.__snuggleWired = true;
   }
@@ -1422,7 +1486,7 @@ window.addEventListener("DOMContentLoaded", () => {
 (function exportStudioAPI(win){
   try {
     // Export to current window first
-    if (typeof studioPlaySnuggle === "function") win.studioPlaySnuggle = studioPlaySnuggle;
+    if (typeof studioPlaySnuggle === "function") win.studioPlaySnuggle = () => studioPlaySnuggleWithConfig();
     if (typeof studioAnimStep === "function") win.studioAnimStep = studioAnimStep;
     if (typeof studioOnSceneReset === "function") win.studioOnSceneReset = studioOnSceneReset;
     if (typeof studioOnOrientationChange === "function") win.studioOnOrientationChange = studioOnOrientationChange;
@@ -1440,7 +1504,7 @@ window.addEventListener("DOMContentLoaded", () => {
   for (const t of targets) {
     if (!t) continue;
     try {
-      if (win.studioPlaySnuggle)         t.studioPlaySnuggle = win.studioPlaySnuggle;
+      if (win.studioPlaySnuggle)         t.studioPlaySnuggle = () => studioPlaySnuggleWithConfig();
       if (win.studioAnimStep)            t.studioAnimStep = win.studioAnimStep;
       if (win.studioOnSceneReset)        t.studioOnSceneReset = win.studioOnSceneReset;
       if (win.studioOnOrientationChange) t.studioOnOrientationChange = win.studioOnOrientationChange;
@@ -1469,7 +1533,12 @@ window.addEventListener("DOMContentLoaded", () => {
       play.addEventListener('click', (e) => {
         if (select.value === 'physics-snuggle') {
           e.preventDefault(); e.stopPropagation();
-          window.openSnuggleDialog();    // <-- now global
+          if (!play.__dialogOpen) {
+            play.__dialogOpen = true;
+            window.openSnuggleDialog();
+            // Reset flag after dialog closes
+            setTimeout(() => { play.__dialogOpen = false; }, 100);
+          }
         }
       });
       play.__snugWired = true;
@@ -1487,7 +1556,7 @@ window.addEventListener("DOMContentLoaded", () => {
 (() => {
   try {
     if (typeof openSnuggleDialog === 'function') window.openSnuggleDialog = openSnuggleDialog;
-    if (typeof studioPlaySnuggle === 'function') window.studioPlaySnuggle = studioPlaySnuggle;
+    if (typeof studioPlaySnuggle === 'function') window.studioPlaySnuggle = () => studioPlaySnuggleWithConfig();
     if (typeof studioAnimStep === 'function') window.studioAnimStep = studioAnimStep;
   } catch (e) {
     console.warn('Snuggle: expose to window failed:', e);

@@ -258,15 +258,7 @@ class SolveTab(QWidget):
         self.sldBright.setValue(150)
         self.sldBright.valueChanged.connect(self.on_brightness_changed)
 
-        reveal_bright_row = QWidget(self)
-        hb = QHBoxLayout(reveal_bright_row)
-        hb.setContentsMargins(0, 0, 0, 0)
-        hb.setSpacing(8)
-
-        hb.addWidget(self.sldReveal, 1)
-        hb.addWidget(QLabel("Brightness:", reveal_bright_row))
-        hb.addWidget(self.sldBright, 1)
-
+        # Single layout to avoid UI overlap
         _reveal_layout.addWidget(self.sldReveal, 1)
         _reveal_layout.addWidget(QLabel("Brightness:", reveal_box))
         _reveal_layout.addWidget(self.sldBright, 1)
