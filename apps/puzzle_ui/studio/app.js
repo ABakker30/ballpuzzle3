@@ -1299,6 +1299,15 @@ async function studioPlaySnuggleWithConfig(cfg = null) {
 
   studioStatus(`Snuggle: ${items.length} pieces, ${config.durationSec}s`);
   
+  // Quaternion error helper (shortest-arc)
+  function quatErr(T,Q){
+    const ew=T.w*Q.w - T.x*Q.x - T.y*Q.y - T.z*Q.z;
+    const ex=T.w*Q.x + T.x*Q.w + T.y*Q.z - T.z*Q.y;
+    const ey=T.w*Q.y - T.x*Q.z + T.y*Q.w + T.z*Q.x;
+    const ez=T.w*Q.z + T.x*Q.y - T.y*Q.x + T.z*Q.w;
+    const s = ew < 0 ? -1 : 1; return {w:s*ew, x:s*ex, y:s*ey, z:s*ez};
+  }
+  
   // PD stepper
   const { KP, KD, KR, KW, FIXED_DT, STABLE_POS, STABLE_ANG_DEG, STABLE_LIN, STABLE_ANG, STABLE_HOLD } = config;
   const POS_OK = STABLE_POS, ANG_OK = STABLE_ANG_DEG * Math.PI/180, V_OK = STABLE_LIN, W_OK = STABLE_ANG, HOLD = STABLE_HOLD;
