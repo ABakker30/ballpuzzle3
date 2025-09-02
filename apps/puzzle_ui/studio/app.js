@@ -1098,6 +1098,275 @@ function mountSnuggleOverlay() {
 // ---------- Boot ----------
 tryWireUI();
 
+// ---------- Snuggle Settings Panel ----------
+
+const SNUG_KEY = "studio.snuggle.cfg.v1";
+
+function getSnuggleDefaults() {
+  const saved = localStorage.getItem(SNUG_KEY);
+  if (saved) { try { return JSON.parse(saved); } catch {} }
+  return {
+    durationSec: 16,
+    // PD gains (slightly higher damping/gains)
+    KP: 32, KD: 10,
+    KR: 24, KW: 8,
+    // stepping
+    FIXED_DT: 1/120, SUBSTEPS: 4,
+    // contact
+    FRICTION: 0.6, RESTITUTION: 0.0,
+    CONTACT_STIFF: 3e7, CONTACT_RELAX: 2.0,
+    FRICTION_STIFF: 3e7, FRICTION_RELAX: 2.0,
+    // colliders & scatter
+    COLLIDER_SHRINK: 0.965, SCATTER: 1.20,
+    // stability thresholds
+    STABLE_POS: 0.02, STABLE_ANG_DEG: 2.0,
+    STABLE_LIN: 0.02, STABLE_ANG: 0.02, STABLE_HOLD: 0.30
+  };
+}
+
+function openSnuggleDialog() {
+  const cfg = getSnuggleDefaults();
+  
+  // Create modal backdrop
+  const backdrop = document.createElement('div');
+  backdrop.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:10000;display:flex;align-items:center;justify-content:center;';
+  
+  // Create modal content
+  const modal = document.createElement('div');
+  modal.style.cssText = 'background:#2a2a2a;border-radius:12px;padding:24px;max-width:500px;width:90%;color:#fff;font:14px/1.4 system-ui;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
+  
+  modal.innerHTML = `
+    <h3 style="margin:0 0 20px 0;color:#4a9eff;">Physics: Snuggle Settings</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Duration (sec)</label>
+        <input type="number" id="snug-duration" value="${cfg.durationSec}" min="1" max="60" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Scatter Factor</label>
+        <input type="number" id="snug-scatter" value="${cfg.SCATTER}" min="1.0" max="2.0" step="0.05" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Position KP</label>
+        <input type="number" id="snug-kp" value="${cfg.KP}" min="1" max="100" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Position KD</label>
+        <input type="number" id="snug-kd" value="${cfg.KD}" min="1" max="50" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Rotation KR</label>
+        <input type="number" id="snug-kr" value="${cfg.KR}" min="1" max="100" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Rotation KW</label>
+        <input type="number" id="snug-kw" value="${cfg.KW}" min="1" max="50" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Contact Stiffness</label>
+        <input type="number" id="snug-contact-stiff" value="${cfg.CONTACT_STIFF}" min="1e6" max="1e8" step="1e6" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Friction</label>
+        <input type="number" id="snug-friction" value="${cfg.FRICTION}" min="0" max="1" step="0.1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+    </div>
+    <div style="display:flex;gap:12px;margin-top:24px;justify-content:flex-end;">
+      <button id="snug-reset" style="padding:8px 16px;border:1px solid #666;border-radius:6px;background:#444;color:#fff;cursor:pointer;">Reset</button>
+      <button id="snug-cancel" style="padding:8px 16px;border:1px solid #666;border-radius:6px;background:#444;color:#fff;cursor:pointer;">Cancel</button>
+      <button id="snug-run" style="padding:8px 16px;border:1px solid #4a9eff;border-radius:6px;background:#4a9eff;color:#fff;cursor:pointer;font-weight:500;">Run</button>
+    </div>
+  `;
+  
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+  
+  // Event handlers
+  const resetBtn = modal.querySelector('#snug-reset');
+  const cancelBtn = modal.querySelector('#snug-cancel');
+  const runBtn = modal.querySelector('#snug-run');
+  
+  resetBtn.addEventListener('click', () => {
+    localStorage.removeItem(SNUG_KEY);
+    const defaults = getSnuggleDefaults();
+    modal.querySelector('#snug-duration').value = defaults.durationSec;
+    modal.querySelector('#snug-scatter').value = defaults.SCATTER;
+    modal.querySelector('#snug-kp').value = defaults.KP;
+    modal.querySelector('#snug-kd').value = defaults.KD;
+    modal.querySelector('#snug-kr').value = defaults.KR;
+    modal.querySelector('#snug-kw').value = defaults.KW;
+    modal.querySelector('#snug-contact-stiff').value = defaults.CONTACT_STIFF;
+    modal.querySelector('#snug-friction').value = defaults.FRICTION;
+    studioStatus('Settings reset to defaults');
+  });
+  
+  cancelBtn.addEventListener('click', () => {
+    document.body.removeChild(backdrop);
+  });
+  
+  runBtn.addEventListener('click', () => {
+    // Collect settings
+    const settings = {
+      durationSec: +modal.querySelector('#snug-duration').value,
+      SCATTER: +modal.querySelector('#snug-scatter').value,
+      KP: +modal.querySelector('#snug-kp').value,
+      KD: +modal.querySelector('#snug-kd').value,
+      KR: +modal.querySelector('#snug-kr').value,
+      KW: +modal.querySelector('#snug-kw').value,
+      CONTACT_STIFF: +modal.querySelector('#snug-contact-stiff').value,
+      FRICTION: +modal.querySelector('#snug-friction').value,
+      // Keep other defaults
+      ...getSnuggleDefaults(),
+    };
+    
+    // Save to localStorage
+    localStorage.setItem(SNUG_KEY, JSON.stringify(settings));
+    
+    // Close modal
+    document.body.removeChild(backdrop);
+    
+    // Start physics with settings
+    studioPlaySnuggleWithConfig(settings);
+  });
+  
+  // Close on backdrop click
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) {
+      document.body.removeChild(backdrop);
+    }
+  });
+}
+
+async function studioPlaySnuggleWithConfig(cfg = null) {
+  const config = cfg || getSnuggleDefaults();
+  
+  // cancel previous if any
+  if (window.__anim) { window.__anim.active = false; window.__anim = null; }
+
+  const C = await loadCannon();
+  if (!C) return;
+
+  // scene + pieces
+  const scene = window.scene, camera = window.camera, renderer = window.renderer;
+  if (!scene || !camera || !renderer) { studioStatus("Studio scene not ready.", "error"); return; }
+
+  const groups = [];
+  scene.traverse(o => { if (o?.userData?.kind === "piece") groups.push(o); });
+  if (!groups.length) { studioStatus("No pieces in Studio.", "error"); return; }
+
+  // targets + ensure metadata
+  const targets = groups.map(g => {
+    const p = new THREE.Vector3(), q = new THREE.Quaternion();
+    g.getWorldPosition(p); g.getWorldQuaternion(q);
+    if (!Array.isArray(g.userData.atoms) || !g.userData.atoms.length || !Number.isFinite(g.userData.atomRadius)) {
+      const atoms = []; let r = null;
+      g.traverse(o => { if (o.isMesh) { atoms.push(o.position.clone()); if (o.geometry?.parameters?.radius && r == null) r = o.geometry.parameters.radius; }});
+      g.userData.atoms = atoms; g.userData.atomRadius = r ?? 0.5;
+    }
+    return { g, p, q, atoms: g.userData.atoms, r: g.userData.atomRadius };
+  });
+
+  // scatter ring around pivot (keep Z)
+  const pivot = targets.reduce((a,t)=>a.add(t.p), new THREE.Vector3()).multiplyScalar(1/targets.length);
+  let maxD = 0; for (const t of targets) maxD = Math.max(maxD, Math.hypot(t.p.x - pivot.x, t.p.y - pivot.y));
+  const R = config.SCATTER * (maxD + 3 * (targets[0].r || 0.5));
+
+  // physics world
+  const world = new C.World();
+  world.gravity.set(0,0,0);
+  world.defaultContactMaterial.friction = config.FRICTION;
+  world.defaultContactMaterial.restitution = config.RESTITUTION || 0.0;
+
+  // bodies
+  const items = [];
+  for (let i=0;i<targets.length;i++){
+    const t = targets[i];
+    const b = new C.Body({ mass: 1 });
+    
+    // scatter position
+    const a = (i / targets.length) * 2 * Math.PI;
+    const sx = pivot.x + R * Math.cos(a), sy = pivot.y + R * Math.sin(a), sz = t.p.z;
+    b.position.set(sx, sy, sz);
+    
+    // collider (compound spheres)
+    for (const atom of t.atoms) {
+      const shape = new C.Sphere(t.r * config.COLLIDER_SHRINK);
+      b.addShape(shape, new C.Vec3(atom.x, atom.y, atom.z));
+    }
+    world.addBody(b);
+    items.push({ group: t.g, body: b, targetPos: t.p.clone(), targetQuat: t.q.clone(), hold: 0, snapped: false });
+  }
+
+  studioStatus(`Snuggle: ${items.length} pieces, ${config.durationSec}s`);
+  
+  // PD stepper
+  const { KP, KD, KR, KW, FIXED_DT, STABLE_POS, STABLE_ANG_DEG, STABLE_LIN, STABLE_ANG, STABLE_HOLD } = config;
+  const POS_OK = STABLE_POS, ANG_OK = STABLE_ANG_DEG * Math.PI/180, V_OK = STABLE_LIN, W_OK = STABLE_ANG, HOLD = STABLE_HOLD;
+  
+  window.__anim = { active: true, C, world, items, t: 0, duration: Math.max(1, config.durationSec) };
+  window.studioAnimStep = function(dt = 1/60) {
+    const A = window.__anim;
+    if (!A?.active) return;
+    
+    const h = Math.min(dt, 0.1);
+    for (let sub = 0; sub < (config.SUBSTEPS || 4); sub++) {
+      for (const it of A.items) {
+        if (it.snapped) continue;
+        const b = it.body;
+        
+        // PD position control
+        const ex = it.targetPos.x - b.position.x;
+        const ey = it.targetPos.y - b.position.y;
+        const ez = it.targetPos.z - b.position.z;
+        b.force.x += KP * ex - KD * b.velocity.x;
+        b.force.y += KP * ey - KD * b.velocity.y;
+        b.force.z += KP * ez - KD * b.velocity.z;
+        
+        // PD rotation control
+        const qe = new THREE.Quaternion().multiplyQuaternions(it.targetQuat, b.quaternion.clone().invert());
+        const w = Math.abs(qe.w);
+        const ang = 2*Math.acos(w);
+        const sden = Math.sqrt(Math.max(1 - w*w, 0));
+        const rx = sden>1e-6 ? (qe.x/sden)*ang : 2*qe.x;
+        const ry = sden>1e-6 ? (qe.y/sden)*ang : 2*qe.y;
+        const rz = sden>1e-6 ? (qe.z/sden)*ang : 2*qe.z;
+        b.torque.x += KR*rx - KW*b.angularVelocity.x;
+        b.torque.y += KR*ry - KW*b.angularVelocity.y;
+        b.torque.z += KR*rz - KW*b.angularVelocity.z;
+        
+        // stability & snap
+        const pOk = Math.hypot(ex,ey,ez) < POS_OK;
+        const aOk = ang < ANG_OK;
+        const vOk = b.velocity.length() < V_OK;
+        const wOk = b.angularVelocity.length() < W_OK;
+        it.hold = (pOk && aOk && vOk && wOk) ? it.hold + h : 0;
+        if (it.hold >= HOLD) {
+          b.velocity.scale(0, b.velocity); b.angularVelocity.scale(0, b.angularVelocity);
+          b.position.set(it.targetPos.x, it.targetPos.y, it.targetPos.z);
+          b.quaternion.set(it.targetQuat.x, it.targetQuat.y, it.targetQuat.z, it.targetQuat.w);
+          it.snapped = true;
+        }
+      }
+      world.step(FIXED_DT, h, 1);
+    }
+    
+    // world → local write-back (handles parent transforms)
+    const v = new THREE.Vector3(), qw = new THREE.Quaternion(), qp = new THREE.Quaternion();
+    for (const it of A.items){
+      const b = it.body, g = it.group, p = g.parent;
+      if (!p) continue;
+      v.set(b.position.x, b.position.y, b.position.z);
+      p.worldToLocal(v); g.position.copy(v);
+      p.getWorldQuaternion(qp).invert();
+      qw.set(b.quaternion.x,b.quaternion.y,b.quaternion.z,b.quaternion.w).premultiply(qp);
+      g.quaternion.copy(qw);
+    }
+    
+    A.t += dt;
+    if (A.items.every(i=>i.snapped) || A.t >= A.duration) A.active = false;
+  };
+}
+
 // Export API to parent/top windows (covers iframe case)
 (function exposeToParents() {
   const targets = [window, window.parent !== window ? window.parent : null, window.top !== window ? window.top : null];
@@ -1172,11 +1441,6 @@ window.addEventListener("DOMContentLoaded", () => {
   studioStatus("Snuggle API exported.");
 })(window);
 
-// Make the panel callable from the Console and from parent UIs
-window.openSnuggleDialog  = window.openSnuggleDialog  || openSnuggleDialog;
-window.studioPlaySnuggle  = window.studioPlaySnuggle  || studioPlaySnuggle;
-
-// Make sure the Play button actually opens the panel (late-mount safe)
 (function ensureSnuggleUI(){
   function attach(){
     const select =
@@ -1196,7 +1460,7 @@ window.studioPlaySnuggle  = window.studioPlaySnuggle  || studioPlaySnuggle;
       play.addEventListener('click', (e) => {
         if (select.value === 'physics-snuggle') {
           e.preventDefault(); e.stopPropagation();
-          window.openSnuggleDialog();
+          window.openSnuggleDialog();    // <-- now global
         }
       });
       play.__snugWired = true;
@@ -1207,5 +1471,16 @@ window.studioPlaySnuggle  = window.studioPlaySnuggle  || studioPlaySnuggle;
   if (!attach()){
     const obs = new MutationObserver(() => { if (attach()) obs.disconnect(); });
     obs.observe(document.body, { childList: true, subtree: true });
+  }
+})();
+
+// make panel & runner callable from Console / parent UI
+(() => {
+  try {
+    if (typeof openSnuggleDialog === 'function') window.openSnuggleDialog = openSnuggleDialog;
+    if (typeof studioPlaySnuggle === 'function') window.studioPlaySnuggle = studioPlaySnuggle;
+    if (typeof studioAnimStep === 'function') window.studioAnimStep = studioAnimStep;
+  } catch (e) {
+    console.warn('Snuggle: expose to window failed:', e);
   }
 })();
