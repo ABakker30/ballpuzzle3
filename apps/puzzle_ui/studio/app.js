@@ -726,6 +726,21 @@ function buildSceneFromSnapshot(snapshot) {
     camera.position.add(delta);
   }
 
+  // Reset all visual properties to default state
+  root.traverse(obj => {
+    if (obj.isMesh) {
+      obj.visible = true;
+      obj.material.transparent = false;
+      obj.material.opacity = 1.0;
+      if (obj.userData?.isBond && obj.userData.baseLen != null) {
+        obj.scale.y = 1.0; // Reset bond scale
+      }
+    }
+    if (obj.isGroup) {
+      obj.visible = true;
+    }
+  });
+
   // Recolor using the actual number of groups that were created (prevents repeats)
   // Skip recolor for containers (they use one colorful material on purpose)
   if (!isContainer) {
@@ -780,7 +795,48 @@ function studioLoadJson(jsonText){
   resetDisplayRoot();                   // hard wipe previous display
   const snap = normalizeSnapshot(obj);
   buildSceneFromSnapshot(snap);         // fresh build
+  
+  // Ensure snapshot is saved for animation resets
+  window.__lastSnapshot = snap;
+  console.log("Snapshot saved for animation resets:", snap);
 };
+
+
+// Helper function to collect pieces and atoms in world space
+function _collectPiecesAtomsWorld() {
+  const groups = _pieceGroups();
+  const pieces = [];
+  
+  for (let i = 0; i < groups.length; i++) {
+    const group = groups[i];
+    const atoms = [];
+    
+    // Collect all mesh positions in world space
+    group.traverse(obj => {
+      if (obj.isMesh && obj.userData?.isAtom) {
+        const worldPos = new THREE.Vector3();
+        obj.getWorldPosition(worldPos);
+        atoms.push({ pos: worldPos, mesh: obj });
+      }
+    });
+    
+    if (atoms.length > 0) {
+      // Calculate centroid
+      const centroid = new THREE.Vector3();
+      atoms.forEach(atom => centroid.add(atom.pos));
+      centroid.divideScalar(atoms.length);
+      
+      pieces.push({
+        group: group,
+        atoms: atoms,
+        centroid: centroid,
+        minZ: Math.min(...atoms.map(a => a.pos.z))
+      });
+    }
+  }
+  
+  return pieces;
+}
 
 // Start: assemble pieces from lowest Z to highest (duration in seconds)
 function studioPlayAssembleBottomUp(durationSec) {
@@ -790,23 +846,10 @@ function studioPlayAssembleBottomUp(durationSec) {
   // Gather world-space atoms, minZ, centroids (oriented positions already baked)
   const pcs = _collectPiecesAtomsWorld();
 
-  // Estimate lattice neighbor distance and build adjacency
-  const nn = _estimateNeighborDistance(pcs);
-  const EPS = nn * 0.06;                      // 6% tolerance; adjust if needed
-
-  const adj = _buildAdjacency(pcs, nn, EPS);
-  // Choose start on XY plane: within tolZ of global minZ
-  const tolZ = Math.max(1e-4, nn * 0.05);
-  const startIdx = _chooseStartIndex(pcs, tolZ);
-  if (startIdx < 0) { studioStatus("Studio: cannot choose start piece"); return; }
-
-  const { order, complete } = _connectedOrder(pcs, adj, startIdx);
-  if (!order.length) { studioStatus("Studio: no connected order"); return; }
-  if (!complete) {
-    studioStatus(`Studio: graph disconnected — assembling first ${order.length} connected piece(s)`);
-  } else {
-    studioStatus(`Studio: assembling ${order.length} piece(s)`);
-  }
+  // Sort pieces by Z position (bottom-up assembly)
+  pcs.sort((a, b) => a.minZ - b.minZ);
+  
+  studioStatus(`Studio: assembling ${pcs.length} piece(s) bottom-up`);
 
   // Initialize visual state: hide all; transparent; bonds collapsed
   for (const g of groups) {
@@ -822,8 +865,8 @@ function studioPlayAssembleBottomUp(durationSec) {
     });
   }
 
-  // Map order of indices → ordered group list
-  const orderedGroups = order.map(i => pcs[i].group);
+  // Map pieces to groups for animation
+  const orderedGroups = pcs.map(p => p.group);
 
   __anim = {
     kind: 'bottomup',
@@ -984,6 +1027,37 @@ async function studioPlaySnuggle(durationSec = 12) {
       world.step(FIXED_DT, h, 1);
     }
 
+    // DRASTIC: Final stage direct positioning for any remaining pieces
+    if (progress > 0.95) {
+      for (const it of A.items) {
+        if (!it.snapped) {
+          const dist = Math.hypot(
+            it.targetPos.x - it.body.position.x,
+            it.targetPos.y - it.body.position.y,
+            it.targetPos.z - it.body.position.z
+          );
+          if (dist > 0.02) {
+            // Force snap to position
+            it.body.position.set(it.targetPos.x, it.targetPos.y, it.targetPos.z);
+            it.body.quaternion.set(it.targetQuat.x, it.targetQuat.y, it.targetQuat.z, it.targetQuat.w);
+            it.body.velocity.set(0, 0, 0);
+            it.body.angularVelocity.set(0, 0, 0);
+            it.snapped = true;
+          }
+        }
+      }
+    }
+
+    // DRASTIC: Restore collision shapes if disabled
+    if (progress > 0.98) {
+      for (const it of A.items) {
+        if (it.collisionsDisabled && it.originalShapes) {
+          it.body.shapes = [...it.originalShapes];
+          it.collisionsDisabled = false;
+        }
+      }
+    }
+
     // world → local write-back (handles parent transforms)
     const v = new THREE.Vector3(), qw = new THREE.Quaternion(), qp = new THREE.Quaternion();
     for (const it of A.items){
@@ -1024,86 +1098,129 @@ window.studioCancelAnim = cancelAnim;
 window.studioOnSceneReset = studioOnSceneReset;
 window.studioOnOrientationChange = studioOnOrientationChange;
 
+// ---------- Unified Animation UI ----------
+function setupUnifiedAnimationUI() {
+  const animSelect = document.querySelector("#animPreset");
+  const playBtn = document.querySelector("#btnPlay");
+  
+  if (!animSelect || !playBtn) {
+    console.warn("Animation controls not found");
+    return;
+  }
+
+  console.log("Setting up animation UI with elements:", animSelect, playBtn);
+
+  // Add scene reset on animation change
+  animSelect.addEventListener("change", () => {
+    console.log("Animation selection changed to:", animSelect.value);
+    console.log("Last snapshot exists:", !!window.__lastSnapshot);
+    
+    // Skip reset if no selection or empty selection
+    if (!animSelect.value || animSelect.value === "") {
+      console.log("Empty selection, skipping reset");
+      return;
+    }
+    
+    // Cancel any running animation first
+    if (typeof cancelAnim === 'function') {
+      cancelAnim("switching animation");
+    }
+    
+    // Reset scene to original loaded state
+    if (window.__lastSnapshot) {
+      console.log("Rebuilding scene from snapshot");
+      
+      // Force complete scene reset
+      resetDisplayRoot();
+      buildSceneFromSnapshot(window.__lastSnapshot);
+      
+      studioStatus("Scene reset for new animation");
+    } else {
+      console.warn("No snapshot available for scene reset");
+      studioStatus("No file loaded - cannot reset scene");
+    }
+  });
+
+  // Wire play button with once flag to prevent duplicate handlers
+  if (!playBtn.__wired) {
+    playBtn.__wired = true;
+    
+    playBtn.addEventListener("click", (e) => {
+      const val = animSelect.value;
+      
+      if (val === "physics-snuggle") {
+        e.preventDefault(); 
+        e.stopPropagation();
+        if (!playBtn.__dialogOpen) {
+          playBtn.__dialogOpen = true;
+          window.openSnuggleDialog();
+          setTimeout(() => { playBtn.__dialogOpen = false; }, 100);
+        }
+      } else if (val === "assemble-bottomup") {
+        // Use requestAnimationFrame to ensure proper timing
+        requestAnimationFrame(() => {
+          const dur = prompt("Duration (seconds):", "10");
+          if (dur && dur !== null && dur !== "") {
+            window.studioPlayAssembleBottomUp?.(+dur);
+          }
+        });
+      } else if (val === "orbit-xy") {
+        // Use requestAnimationFrame to ensure proper timing
+        requestAnimationFrame(() => {
+          const dur = prompt("Duration (seconds):", "10");
+          if (dur && dur !== null && dur !== "") {
+            window.studioPlayOrbitXY?.(+dur);
+          }
+        });
+      }
+    });
+  }
+
+  studioStatus("Unified animation UI ready.");
+}
+
 // ---------- UI integration (robust wiring + fallback overlay) ----------
 function tryWireUI() {
-  const attach = () => {
-    // Prefer explicit selectors; otherwise pick the first reasonable <select>
-    const explicit = document.querySelector("#animPreset, #animationPreset, select[data-role='anim-select']");
-    const candidates = Array.from(document.querySelectorAll("select"));
-    const guess = candidates.find(sel => {
-      const text = [sel.id, sel.className, ...Array.from(sel.options).map(o => o.textContent || "")]
-        .join(" ").toLowerCase();
-      return /anim|preset|reveal|timeline|spin|orbit/.test(text);
-    });
-    const select = explicit || guess;
-    if (!select) return false;
-
-    if (!Array.from(select.options).some(o => o.value === "physics-snuggle")) {
-      const opt = new Option("Physics: Snuggle", "physics-snuggle");
-      select.add(opt);
-    }
-
-    // Find a Play button
-    const playBtn = document.querySelector("#btnPlay, #studioPlay, button[data-role='anim-play']") ||
-      Array.from(document.querySelectorAll("button")).find(b =>
-        /play|start/i.test(b.textContent || "") && /anim|studio|animation/i.test((b.id + b.className + b.textContent).toLowerCase())
-      );
-
-    if (!playBtn) return false;
-    if (!playBtn.__snuggleWired) {
-      playBtn.addEventListener("click", (e) => {
-        if (select.value === "physics-snuggle") {
-          e.preventDefault(); e.stopPropagation();
-          if (!playBtn.__dialogOpen) {
-            playBtn.__dialogOpen = true;
-            window.openSnuggleDialog();
-            setTimeout(() => { playBtn.__dialogOpen = false; }, 100);
-          }
-        }
-      });
-      playBtn.__snuggleWired = true;
-    }
-    studioStatus("Snuggle UI wired.");
-    return true;
-  };
-
-  // Try now
-  if (attach()) return;
-
-  // Wait for late DOM (PyQt-driven UIs often mount after load)
-  const obs = new MutationObserver(() => { if (attach()) obs.disconnect(); });
-  obs.observe(document.body, { childList: true, subtree: true });
-
-  // Last-resort: add a tiny overlay after 1200ms
-  setTimeout(() => { if (!attach()) mountSnuggleOverlay(); }, 1200);
+  // Use the new unified animation UI
+  setupUnifiedAnimationUI();
 }
 
 function mountSnuggleOverlay() {
-  const wrap = document.createElement("div");
-  wrap.style.cssText = "position:absolute;right:12px;bottom:12px;z-index:9999;background:#111a;border:1px solid #333;padding:8px 10px;border-radius:10px;color:#fff;font:12px system-ui;display:flex;gap:8px;align-items:center;";
-  const label = document.createElement("span"); label.textContent = "Anim:";
-  const sel = document.createElement("select");
-  sel.innerHTML = "<option value='none'>—</option><option value='physics-snuggle'>Physics: Snuggle</option>";
-  const btn = document.createElement("button");
-  btn.textContent = "Play";
-  btn.style.cssText = "padding:4px 10px;border-radius:8px;border:1px solid #444;background:#222;color:#fff;cursor:pointer;";
-  btn.addEventListener("click", (e) => { 
-    if (sel.value === "physics-snuggle") {
-      e.preventDefault(); e.stopPropagation();
-      if (!btn.__dialogOpen) {
-        btn.__dialogOpen = true;
-        window.openSnuggleDialog();
-        setTimeout(() => { btn.__dialogOpen = false; }, 100);
-      }
-    }
-  });
-  wrap.append(label, sel, btn);
-  document.body.appendChild(wrap);
-  studioStatus("Overlay added (fallback).");
+  // Unified UI handles all animations now
+  console.log("Overlay not needed - using unified animation controls");
 }
 
 // ---------- Boot ----------
-tryWireUI();
+function initializeUI() {
+  console.log("Initializing UI, DOM state:", document.readyState);
+  
+  // Wait a bit for elements to be available
+  setTimeout(() => {
+    const animSelect = document.querySelector("#animPreset");
+    const playBtn = document.querySelector("#btnPlay");
+    
+    console.log("Elements found:", {
+      animSelect: !!animSelect,
+      playBtn: !!playBtn,
+      animSelectId: animSelect?.id,
+      playBtnId: playBtn?.id
+    });
+    
+    if (animSelect && playBtn) {
+      tryWireUI();
+    } else {
+      console.warn("Animation UI elements not found, retrying...");
+      setTimeout(initializeUI, 500);
+    }
+  }, 100);
+}
+
+document.addEventListener("DOMContentLoaded", initializeUI);
+
+// Also try immediately in case DOM is already ready
+if (document.readyState !== "loading") {
+  initializeUI();
+}
 
 // ---------- Snuggle Settings Panel ----------
 
@@ -1123,10 +1240,10 @@ function getSnuggleDefaults() {
   }
   console.log('Using default settings');
   return {
-    durationSec: 16,
-    // PD gains (slightly higher damping/gains)
-    KP: 32, KD: 10,
-    KR: 24, KW: 8,
+    durationSec: 20,
+    // PD gains (much stronger for guaranteed convergence)
+    KP: 80, KD: 16,
+    KR: 60, KW: 12,
     // stepping
     FIXED_DT: 1/120, SUBSTEPS: 4,
     // contact
@@ -1134,10 +1251,15 @@ function getSnuggleDefaults() {
     CONTACT_STIFF: 3e7, CONTACT_RELAX: 2.0,
     FRICTION_STIFF: 3e7, FRICTION_RELAX: 2.0,
     // colliders & scatter
-    COLLIDER_SHRINK: 0.965, SCATTER: 1.20,
-    // stability thresholds
-    STABLE_POS: 0.02, STABLE_ANG_DEG: 2.0,
-    STABLE_LIN: 0.02, STABLE_ANG: 0.02, STABLE_HOLD: 0.30
+    COLLIDER_SHRINK: 0.965, SCATTER: 1.50,
+    // solution scaling (minimal for guaranteed convergence)
+    SOLUTION_SCALE: 1.01,
+    // stability thresholds (tighter for guaranteed landing)
+    STABLE_POS: 0.015, STABLE_ANG_DEG: 1.5,
+    STABLE_LIN: 0.015, STABLE_ANG: 0.015, STABLE_HOLD: 0.25,
+    // drastic options
+    MAGNETIC_WELLS: true, DISABLE_COLLISIONS: true, DIRECT_INTERPOLATION: true,
+    SNAP_DISTANCE: 0.08
   };
 }
 
@@ -1189,6 +1311,10 @@ function openSnuggleDialog() {
         <label style="display:block;margin-bottom:8px;font-weight:500;">Friction</label>
         <input type="number" id="snug-friction" min="0" max="1" step="0.1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
       </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Solution Scale</label>
+        <input type="number" id="snug-solution-scale" min="1.0" max="1.2" step="0.01" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
     </div>
     <div style="display:flex;gap:12px;margin-top:24px;justify-content:flex-end;">
       <button id="snug-reset" style="padding:8px 16px;border:1px solid #666;border-radius:6px;background:#444;color:#fff;cursor:pointer;">Reset</button>
@@ -1209,6 +1335,7 @@ function openSnuggleDialog() {
   modal.querySelector('#snug-kw').value = cfg.KW;
   modal.querySelector('#snug-contact-stiff').value = cfg.CONTACT_STIFF;
   modal.querySelector('#snug-friction').value = cfg.FRICTION;
+  modal.querySelector('#snug-solution-scale').value = cfg.SOLUTION_SCALE;
   
   // Event handlers
   const resetBtn = modal.querySelector('#snug-reset');
@@ -1227,6 +1354,7 @@ function openSnuggleDialog() {
     modal.querySelector('#snug-kw').value = defaults.KW;
     modal.querySelector('#snug-contact-stiff').value = defaults.CONTACT_STIFF;
     modal.querySelector('#snug-friction').value = defaults.FRICTION;
+    modal.querySelector('#snug-solution-scale').value = defaults.SOLUTION_SCALE;
     studioStatus('Settings reset to defaults');
   });
   
@@ -1250,6 +1378,7 @@ function openSnuggleDialog() {
       KW: +modal.querySelector('#snug-kw').value || 8,
       CONTACT_STIFF: +modal.querySelector('#snug-contact-stiff').value || 3e7,
       FRICTION: +modal.querySelector('#snug-friction').value || 0.6,
+      SOLUTION_SCALE: +modal.querySelector('#snug-solution-scale').value || 1.08,
       // Add other required defaults that aren't in the form
       FIXED_DT: 1/120,
       SUBSTEPS: 4,
@@ -1258,11 +1387,11 @@ function openSnuggleDialog() {
       FRICTION_STIFF: 3e7,
       FRICTION_RELAX: 2.0,
       COLLIDER_SHRINK: 0.965,
-      STABLE_POS: 0.02,
-      STABLE_ANG_DEG: 2.0,
-      STABLE_LIN: 0.02,
-      STABLE_ANG: 0.02,
-      STABLE_HOLD: 0.30
+      STABLE_POS: 0.035,
+      STABLE_ANG_DEG: 3.5,
+      STABLE_LIN: 0.035,
+      STABLE_ANG: 0.035,
+      STABLE_HOLD: 0.45
     };
     
     // Debug: log collected settings
@@ -1295,7 +1424,7 @@ async function studioPlaySnuggleWithConfig(cfg = null) {
   console.log('Final Snuggle Config being used:', config);
   
   // Visual confirmation of key parameters
-  studioStatus(`Physics: KP=${config.KP}, KD=${config.KD}, KR=${config.KR}, Duration=${config.durationSec}s`);
+  studioStatus(`Physics: KP=${config.KP}, KD=${config.KD}, KR=${config.KR}, Scale=${config.SOLUTION_SCALE}x, Duration=${config.durationSec}s`);
   
   // cancel previous if any
   if (window.__anim) { window.__anim.active = false; window.__anim = null; }
@@ -1323,8 +1452,17 @@ async function studioPlaySnuggleWithConfig(cfg = null) {
     return { g, p, q, atoms: g.userData.atoms, r: g.userData.atomRadius };
   });
 
-  // scatter ring around pivot (keep Z)
+  // Apply solution scaling to create snuggle room
   const pivot = targets.reduce((a,t)=>a.add(t.p), new THREE.Vector3()).multiplyScalar(1/targets.length);
+  if (config.SOLUTION_SCALE && config.SOLUTION_SCALE !== 1.0) {
+    for (const t of targets) {
+      const offset = t.p.clone().sub(pivot).multiplyScalar(config.SOLUTION_SCALE);
+      t.p.copy(pivot).add(offset);
+    }
+    studioStatus(`Solution scaled by ${config.SOLUTION_SCALE}x for better snuggle dynamics`);
+  }
+
+  // scatter ring around pivot (keep Z)
   let maxD = 0; for (const t of targets) maxD = Math.max(maxD, Math.hypot(t.p.x - pivot.x, t.p.y - pivot.y));
   const R = config.SCATTER * (maxD + 3 * (targets[0].r || 0.5));
 
@@ -1380,13 +1518,78 @@ async function studioPlaySnuggleWithConfig(cfg = null) {
         if (it.snapped) continue;
         const b = it.body;
         
-        // PD position control
+        // Calculate position errors first
         const ex = it.targetPos.x - b.position.x;
         const ey = it.targetPos.y - b.position.y;
         const ez = it.targetPos.z - b.position.z;
-        b.force.x += KP * ex - KD * b.velocity.x;
-        b.force.y += KP * ey - KD * b.velocity.y;
-        b.force.z += KP * ez - KD * b.velocity.z;
+        const dist = Math.hypot(ex, ey, ez);
+        
+        // DRASTIC: Multi-stage with forced final positioning
+        const progress = Math.min(1.0, A.t / A.duration);
+        let dynamicKP, dynamicKR;
+        
+        if (progress < 0.5) {
+          // Stage 1: Moderate exploration (0-50%)
+          dynamicKP = KP * 1.0;
+          dynamicKR = KR * 1.0;
+        } else if (progress < 0.8) {
+          // Stage 2: Strong attraction (50-80%)
+          dynamicKP = KP * 3.0;
+          dynamicKR = KR * 3.0;
+        } else {
+          // Stage 3: FORCED convergence (80-100%)
+          dynamicKP = KP * 10.0;
+          dynamicKR = KR * 10.0;
+          
+          // DRASTIC: Magnetic wells - exponential attraction near targets
+          if (config.MAGNETIC_WELLS && dist < 0.2) {
+            const magneticForce = 2000 * Math.exp(-dist * 10) * Math.min(1.0, (progress - 0.8) / 0.2);
+            b.force.x += magneticForce * ex / Math.max(dist, 1e-6);
+            b.force.y += magneticForce * ey / Math.max(dist, 1e-6);
+            b.force.z += magneticForce * ez / Math.max(dist, 1e-6);
+          }
+          
+          // DRASTIC: Add direct teleportation force for stubborn pieces
+          if (dist > 0.05) {
+            const teleportForce = 1000 * Math.min(1.0, (progress - 0.8) / 0.2);
+            b.force.x += teleportForce * ex / Math.max(dist, 1e-6);
+            b.force.y += teleportForce * ey / Math.max(dist, 1e-6);
+            b.force.z += teleportForce * ez / Math.max(dist, 1e-6);
+          }
+          
+          // DRASTIC: Direct velocity damping in final stage
+          b.velocity.scale(0.8, b.velocity);
+          b.angularVelocity.scale(0.8, b.angularVelocity);
+          
+          // DRASTIC: Disable collisions between pieces in final stage
+          if (config.DISABLE_COLLISIONS && progress > 0.85) {
+            // Remove collision shapes temporarily
+            if (!it.collisionsDisabled) {
+              it.originalShapes = [...b.shapes];
+              b.shapes.length = 0;
+              it.collisionsDisabled = true;
+            }
+          }
+        }
+        
+        // DRASTIC: Direct interpolation for pieces within snap distance
+        if (config.DIRECT_INTERPOLATION && dist < config.SNAP_DISTANCE && progress > 0.7) {
+          const lerpFactor = Math.min(1.0, (progress - 0.7) / 0.3) * 0.1;
+          b.position.x = b.position.x + lerpFactor * ex;
+          b.position.y = b.position.y + lerpFactor * ey;
+          b.position.z = b.position.z + lerpFactor * ez;
+          
+          // Slerp rotation
+          const currentQ = new THREE.Quaternion(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+          const targetQ = new THREE.Quaternion(it.targetQuat.x, it.targetQuat.y, it.targetQuat.z, it.targetQuat.w);
+          currentQ.slerp(targetQ, lerpFactor);
+          b.quaternion.set(currentQ.x, currentQ.y, currentQ.z, currentQ.w);
+        }
+        
+        // PD position control with dynamic gains
+        b.force.x += dynamicKP * ex - KD * b.velocity.x;
+        b.force.y += dynamicKP * ey - KD * b.velocity.y;
+        b.force.z += dynamicKP * ez - KD * b.velocity.z;
         
         // PD rotation control (use same quatErr as original)
         const qe = quatErr(it.targetQuat, b.quaternion);
@@ -1396,9 +1599,9 @@ async function studioPlaySnuggleWithConfig(cfg = null) {
         const rx = sden>1e-6 ? (qe.x/sden)*ang : 2*qe.x;
         const ry = sden>1e-6 ? (qe.y/sden)*ang : 2*qe.y;
         const rz = sden>1e-6 ? (qe.z/sden)*ang : 2*qe.z;
-        b.torque.x += KR*rx - KW*b.angularVelocity.x;
-        b.torque.y += KR*ry - KW*b.angularVelocity.y;
-        b.torque.z += KR*rz - KW*b.angularVelocity.z;
+        b.torque.x += dynamicKR*rx - KW*b.angularVelocity.x;
+        b.torque.y += dynamicKR*ry - KW*b.angularVelocity.y;
+        b.torque.z += dynamicKR*rz - KW*b.angularVelocity.z;
         
         // stability & snap
         const pOk = Math.hypot(ex,ey,ez) < POS_OK;

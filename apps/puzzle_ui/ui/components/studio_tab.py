@@ -65,18 +65,6 @@ class StudioTab(QWidget):
         row.addWidget(QLabel("Orientation:"))
         row.addWidget(self.cmbOrient, 0, Qt.AlignLeft)
 
-        # --- Animation preset + Play
-        self.cmbAnim = QComboBox()
-        self.cmbAnim.setMinimumWidth(240)
-        self.cmbAnim.addItem("Assemble: Bottom-up (Z →)", "assemble-bottomup")
-        self.cmbAnim.addItem("Camera: Orbit 360° (XY)", "orbit-xy")
-
-        self.btnPlay = QPushButton("Play")
-
-        row.addSpacing(12)
-        row.addWidget(QLabel("Animation:"))
-        row.addWidget(self.cmbAnim, 0, Qt.AlignLeft)
-        row.addWidget(self.btnPlay, 0, Qt.AlignLeft)
 
         row.addStretch(1)
 
@@ -120,11 +108,11 @@ class StudioTab(QWidget):
                 )
         )
         self.btnSave.clicked.connect(self._on_save_png)
-        self.btnPlay.clicked.connect(self._on_play_anim)
 
     def _on_open(self):
-        # Use last directory or default to current directory
-        start_dir = self.last_open_dir if self.last_open_dir else ""
+        # Use last directory or default to solver results directory
+        default_dir = r"C:\Grasshopper\Projects\Projects\2025\ballpuzzle3\external\solver\results"
+        start_dir = self.last_open_dir if self.last_open_dir else default_dir
         
         path, _ = QFileDialog.getOpenFileName(
             self, "Open geometry JSON", start_dir, "JSON files (*.json);;All files (*)"
@@ -177,21 +165,3 @@ class StudioTab(QWidget):
         # Run JS and get the data URL back
         self.web.page().runJavaScript(js, _write_png)
 
-    def _on_play_anim(self):
-        key = self.cmbAnim.currentData()
-        # Ask for duration
-        dur, ok = QInputDialog.getDouble(
-            self, "Animation Duration", "Duration (seconds):",
-            10.0, 1.0, 600.0, 1
-        )
-        if not ok:
-            return
-
-        if key == "assemble-bottomup":
-            self.web.page().runJavaScript(
-                f'(window.studioPlayAssembleBottomUp ? studioPlayAssembleBottomUp({dur}) : console.warn("Studio not ready"))'
-            )
-        elif key == "orbit-xy":
-            self.web.page().runJavaScript(
-                f'(window.studioPlayOrbitXY ? studioPlayOrbitXY({dur}) : console.warn("Studio not ready"))'
-            )

@@ -8,11 +8,26 @@
     html, body { height:100%; margin:0; background:#111; color:#ddd; }
     #root { position:absolute; inset:0; }
     #status { position:fixed; left:10px; top:10px; padding:4px 8px; background:rgba(0,0,0,0.4); border-radius:6px; font:12px/1.1 sans-serif; }
+    #animControls { position:fixed; right:10px; top:10px; display:flex; align-items:center; gap:8px; padding:6px 12px; background:rgba(0,0,0,0.7); border-radius:6px; font:12px/1.1 sans-serif; }
+    #animControls select { padding:4px 8px; border:1px solid #555; border-radius:4px; background:#333; color:#fff; }
+    #animControls button { padding:4px 12px; border:1px solid #4a9eff; border-radius:4px; background:#4a9eff; color:#fff; cursor:pointer; font-weight:500; }
   </style>
 </head>
 <body>
   <div id="root"></div>
   <div id="status">Studio: no file loaded</div>
+  
+  <!-- Unified Animation Controls -->
+  <div id="animControls">
+    <label>Animation:</label>
+    <select id="animPreset">
+      <option value="">—</option>
+      <option value="assemble-bottomup">Assemble: Bottom-up (Z →)</option>
+      <option value="orbit-xy">Camera: Orbit 360° (XY)</option>
+      <option value="physics-snuggle">Physics: Snuggle</option>
+    </select>
+    <button id="btnPlay">Play</button>
+  </div>
 
   <!-- Use the SAME library includes you use in viewer/index.html -->
   <!-- Studio index.html -->
