@@ -834,7 +834,7 @@ let _shapeEditorMode = false;
       let segments = 16;
       let rings = 12;
       
-      const geometry = new THREE.SphereGeometry(_shapeRadius, segments, rings);
+      const geometry = new THREE.SphereGeometry(_shapeRadius * 0.7, segments, rings);
       const sphere = new THREE.Mesh(geometry, _shapeMaterials.frontier);
       sphere.position.set(center.x, center.y, center.z);
       sphere.userData.isShapeEditor = true;
@@ -846,7 +846,7 @@ let _shapeEditorMode = false;
     // Create invisible frontier spheres for interaction (when neighbors are hidden)
     if (_frontierSpheres.length === 0 && _allFrontierSpheres.length > 0) {
       _allFrontierSpheres.forEach((center, idx) => {
-        const geometry = new THREE.SphereGeometry(_shapeRadius, 24, 16);
+        const geometry = new THREE.SphereGeometry(_shapeRadius * 0.7, 24, 16);
         const invisibleMaterial = new THREE.MeshLambertMaterial({
           color: 0xffffff,
           transparent: true,
@@ -997,8 +997,16 @@ let _shapeEditorMode = false;
     if (window.viewer && window.viewer.fitOnce) window.viewer.fitOnce({ margin: 1.02 });
   }
   
+  let _lastMouseMoveTime = 0;
+  const MOUSE_THROTTLE_MS = 16; // ~60fps
+  
   function _onMouseMove(event) {
     if (!_shapeEditorMode) return;
+    
+    // Throttle mouse move events to prevent performance issues
+    const now = performance.now();
+    if (now - _lastMouseMoveTime < MOUSE_THROTTLE_MS) return;
+    _lastMouseMoveTime = now;
     
     const rect = renderer.domElement.getBoundingClientRect();
     mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -1024,7 +1032,17 @@ let _shapeEditorMode = false;
     }
     
     if (intersects.length > 0) {
-      const target = intersects[0].object;
+      // Use same target selection logic as click for consistent hover preview
+      let target = intersects[0].object;
+      
+      // If we hit multiple objects, prefer active spheres for consistent behavior
+      for (let i = 0; i < intersects.length; i++) {
+        if (intersects[i].object.userData.shapeType === 'active') {
+          target = intersects[i].object;
+          break;
+        }
+      }
+      
       const shapeType = target.userData.shapeType;
       
       // Show hover preview with appropriate color

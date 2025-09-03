@@ -161,7 +161,7 @@ class ShapeTab(QWidget):
         help_text = QLabel(
             "• Click on frontier spheres (translucent) to add them\n"
             "• Click on active spheres (solid) to remove them\n"
-            "• Origin sphere (0,0,0) cannot be removed\n"
+            "• At least one sphere must remain in the shape\n"
             "• Hover to preview sphere placement\n"
             "• Shape maintains FCC lattice connectivity",
             help_group
@@ -402,8 +402,7 @@ class ShapeTab(QWidget):
                 neighbor_idx = self._add_idx(active_idx, offset)
                 
                 if (self._parity_ok(neighbor_idx) and 
-                    neighbor_idx not in self.active_spheres and
-                    neighbor_idx != (0, 0, 0)):  # Origin always active
+                    neighbor_idx not in self.active_spheres):
                     self.frontier_spheres.add(neighbor_idx)
     
     def _activate_sphere(self, idx: Tuple[int, int, int]) -> bool:
@@ -420,8 +419,8 @@ class ShapeTab(QWidget):
         return True
     
     def _deactivate_sphere(self, idx: Tuple[int, int, int]) -> bool:
-        """Remove sphere from active set (except origin) and add back to frontier if valid."""
-        if idx == (0, 0, 0) or idx not in self.active_spheres:
+        """Remove sphere from active set if not the last remaining sphere."""
+        if idx not in self.active_spheres or len(self.active_spheres) <= 1:
             return False
         
         self.active_spheres.remove(idx)
@@ -437,8 +436,7 @@ class ShapeTab(QWidget):
         
         # Add back to frontier if it has active neighbors and satisfies constraints
         if (has_active_neighbor and 
-            self._parity_ok(idx) and 
-            idx != (0, 0, 0)):
+            self._parity_ok(idx)):
             self.frontier_spheres.add(idx)
         
         self._rebuild_frontier()
