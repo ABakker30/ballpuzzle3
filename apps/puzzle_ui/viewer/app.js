@@ -42,7 +42,13 @@ function __restoreZoom() {
 
 // Optional (nice-to-have): keep the saved zoom in sync with user actions:
 if (typeof controls !== "undefined" && controls) {
-  controls.addEventListener("change", __saveZoom);
+  controls.addEventListener("change", function() {
+    __saveZoom();
+    // Prevent sphere disappearing during camera movement in shape editor
+    if (_shapeEditorMode && _activeSpheres && _activeSpheres.length > 0) {
+      _validateShapeEditorSpheres();
+    }
+  });
 }
 
 // ===== Distinct color strategies (25 pieces) =====
@@ -283,6 +289,12 @@ function onResize() {
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
+  
+  // Validate shape editor spheres during animation loop
+  if (_shapeEditorMode && _activeSpheres && _activeSpheres.length > 0) {
+    _validateShapeEditorSpheres();
+  }
+  
   renderer.render(window.scene, camera);
 }
 
@@ -631,8 +643,7 @@ window.viewer = window.viewer || {};
 })();
 
 // ---------- Shape Editor Functions ----------
-(function() {
-  let _shapeEditorMode = false;
+let _shapeEditorMode = false;
   let _activeSpheres = [];
   let _frontierSpheres = [];
   let _allFrontierSpheres = [];
@@ -908,6 +919,54 @@ window.viewer = window.viewer || {};
     }
   }
   
+  // Validation function to ensure spheres remain visible during camera changes
+  let _validationThrottle = 0;
+  function _validateShapeEditorSpheres() {
+    if (!_shapeEditorMode || !_activeSpheres || _activeSpheres.length === 0) return;
+    
+    // Throttle validation to avoid excessive rebuilds during rapid camera movement
+    const now = performance.now();
+    if (now - _validationThrottle < 100) return; // Max 10 times per second
+    _validationThrottle = now;
+    
+    const root = ensureDisplayRoot();
+    const activeSphereObjects = root.children.filter(obj => obj.userData?.shapeType === 'active');
+    
+    // Check if we have the expected number of active spheres
+    if (activeSphereObjects.length !== _activeSpheres.length) {
+      console.warn('[Shape] VALIDATION: Expected', _activeSpheres.length, 'active spheres, found', activeSphereObjects.length, '- rebuilding');
+      _buildShapeEditor(); // Rebuild if count mismatch
+      return;
+    }
+    
+    // Check visibility and opacity of existing spheres
+    let fixedCount = 0;
+    activeSphereObjects.forEach((sphere, idx) => {
+      if (!sphere.visible) {
+        console.warn('[Shape] VALIDATION: Fixed invisible sphere', idx);
+        sphere.visible = true;
+        fixedCount++;
+      }
+      if (sphere.material && sphere.material.opacity < 1.0) {
+        console.warn('[Shape] VALIDATION: Fixed transparent sphere', idx);
+        sphere.material.opacity = 1.0;
+        sphere.material.transparent = false;
+        fixedCount++;
+      }
+      
+      // Ensure sphere is properly added to scene hierarchy
+      if (!sphere.parent) {
+        console.warn('[Shape] VALIDATION: Re-adding orphaned sphere', idx);
+        root.add(sphere);
+        fixedCount++;
+      }
+    });
+    
+    if (fixedCount > 0) {
+      console.log('[Shape] VALIDATION: Fixed', fixedCount, 'sphere visibility/hierarchy issues');
+    }
+  }
+  
   function _updateCameraPivot() {
     if (_activeSpheres.length === 0) return;
     
@@ -1085,7 +1144,6 @@ window.viewer = window.viewer || {};
     }
     return true;
   };
-})();
 
 // ---------- WebChannel hookup ----------
 function setupWebChannel() {

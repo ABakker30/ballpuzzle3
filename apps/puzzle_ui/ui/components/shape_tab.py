@@ -82,6 +82,7 @@ class ShapeTab(QWidget):
         self._build_ui()
         self._setup_viewer()
         self._reset_to_origin()
+        
     
     def _build_ui(self):
         """Build the main UI layout: left panel + 3D viewer."""
@@ -209,10 +210,39 @@ class ShapeTab(QWidget):
         """Called when the viewer page finishes loading."""
         if success:
             print("[Shape] Viewer page loaded successfully")
-            # Delay the update to ensure JavaScript is fully initialized
-            QTimer.singleShot(500, self._update_viewer)
+            # Initialize shape editor mode and update viewer with origin sphere
+            QTimer.singleShot(500, self._initialize_shape_editor)
         else:
             print("[Shape] Viewer page failed to load")
+    
+    def _initialize_shape_editor(self):
+        """Initialize the shape editor with origin sphere after viewer is ready."""
+        print("[Shape] Initializing shape editor with origin sphere")
+        print(f"[Shape] Current active spheres before init: {self.active_spheres}")
+        print(f"[Shape] Current frontier spheres before init: {self.frontier_spheres}")
+        
+        # Only initialize if no spheres exist (don't override loaded files)
+        if not self.active_spheres:
+            self.active_spheres.add((0, 0, 0))
+            self._rebuild_frontier()
+            self._recompute_shift()
+            self._update_ui()
+            
+            print(f"[Shape] After init - active spheres: {self.active_spheres}")
+            print(f"[Shape] After init - frontier spheres count: {len(self.frontier_spheres)}")
+            print(f"[Shape] After init - shift: {self.shift}")
+        else:
+            print("[Shape] Skipping init - spheres already exist (file loaded)")
+        
+        # Add longer delay to ensure viewer is fully ready
+        print("[Shape] Scheduling viewer update with delay...")
+        QTimer.singleShot(1000, self._delayed_viewer_update)
+    
+    def _delayed_viewer_update(self):
+        """Delayed viewer update to ensure JavaScript is fully initialized."""
+        print("[Shape] Executing delayed viewer update")
+        self._update_viewer()
+    
     
     @Slot(str)
     def onSphereClicked(self, click_data_json: str):
@@ -390,11 +420,27 @@ class ShapeTab(QWidget):
         return True
     
     def _deactivate_sphere(self, idx: Tuple[int, int, int]) -> bool:
-        """Remove sphere from active set (except origin)."""
+        """Remove sphere from active set (except origin) and add back to frontier if valid."""
         if idx == (0, 0, 0) or idx not in self.active_spheres:
             return False
         
         self.active_spheres.remove(idx)
+        
+        # Check if the removed sphere should become a frontier sphere
+        # It's valid if it has at least one active neighbor and satisfies parity
+        has_active_neighbor = False
+        for offset in self.FCC_OFFSETS:
+            neighbor_idx = self._add_idx(idx, offset)
+            if neighbor_idx in self.active_spheres:
+                has_active_neighbor = True
+                break
+        
+        # Add back to frontier if it has active neighbors and satisfies constraints
+        if (has_active_neighbor and 
+            self._parity_ok(idx) and 
+            idx != (0, 0, 0)):
+            self.frontier_spheres.add(idx)
+        
         self._rebuild_frontier()
         self._recompute_shift()
         self._update_ui()
@@ -417,9 +463,8 @@ class ShapeTab(QWidget):
         
         self._update_ui()
         
-        # Force viewer reload to ensure it's responsive
-        self._setup_viewer()
-        QTimer.singleShot(1000, self._update_viewer)
+        # Update viewer to show reset state
+        self._update_viewer()
     
     def _update_ui(self):
         """Update UI labels and counters."""
@@ -481,32 +526,65 @@ class ShapeTab(QWidget):
         console.log('[Shape]   - Show neighbors:', {str(self.chk_show_neighbors.isChecked()).lower()});
         console.log('[Shape]   - Current scene children before update:', window.scene ? window.scene.children.length : 'no scene');
         console.log('[Shape] First 3 active spheres:', {json.dumps(active_spheres[:3])});
-        console.log('[Shape] Memory usage before update:', window.performance ? window.performance.memory : 'no memory info');
         
-        if (window.viewer && window.viewer.loadShapeEditor) {{
-           data = {{
+        // Check if viewer is properly initialized
+        console.log('[Shape] Viewer availability check:');
+        console.log('[Shape]   - window.viewer exists:', typeof window.viewer !== 'undefined');
+        console.log('[Shape]   - loadShapeEditor exists:', typeof window.viewer?.loadShapeEditor === 'function');
+        console.log('[Shape]   - scene exists:', typeof window.scene !== 'undefined');
+        console.log('[Shape]   - camera exists:', typeof window.camera !== 'undefined');
+        console.log('[Shape]   - renderer exists:', typeof window.renderer !== 'undefined');
+        
+        // Force viewer initialization if needed
+        if (typeof window.viewer === 'undefined' || typeof window.viewer.loadShapeEditor !== 'function') {{
+            console.error('[Shape] CRITICAL: Viewer not properly initialized, attempting to reinitialize...');
+            
+            // Try to trigger viewer initialization
+            if (typeof setupWebChannel === 'function') {{
+                console.log('[Shape] Calling setupWebChannel to reinitialize viewer');
+                setupWebChannel();
+            }}
+            
+            // Wait a bit and try again
+            setTimeout(function() {{
+                console.log('[Shape] Retrying after reinitialize attempt');
+                if (window.viewer && window.viewer.loadShapeEditor) {{
+                    const data = {{
+                        'active_spheres': {json.dumps(active_spheres)},
+                        'frontier_spheres': {json.dumps(frontier_spheres if self.chk_show_neighbors.isChecked() else [])},
+                        'all_frontier_spheres': {json.dumps(frontier_spheres)},
+                        'radius': {self.RADIUS},
+                        'edit_color': "{color_name}"
+                    }};
+                    window.viewer.loadShapeEditor(data);
+                    console.log('[Shape] Retry loadShapeEditor completed');
+                }} else {{
+                    console.error('[Shape] Retry failed - viewer still not available');
+                }}
+            }}, 1000);
+        }} else {{
+        
+        const data = {{
             'active_spheres': {json.dumps(active_spheres)},
             'frontier_spheres': {json.dumps(frontier_spheres if self.chk_show_neighbors.isChecked() else [])},
             'all_frontier_spheres': {json.dumps(frontier_spheres)},
             'radius': {self.RADIUS},
             'edit_color': "{color_name}"
         }};
-        console.log('[Shape] Calling loadShapeEditor with data keys:', Object.keys(data));
-        console.log('[Shape] Data validation - active_spheres length:', data.active_spheres.length);
         
-        try {{
-            window.viewer.loadShapeEditor(data);
-            console.log('[Shape] loadShapeEditor call completed successfully');
-        }} catch (error) {{
-            console.error('[Shape] ERROR in loadShapeEditor:', error);
-            console.error('[Shape] Error stack:', error.stack);
-        }}
-        
-        console.log('[Shape] Memory usage after update:', window.performance ? window.performance.memory : 'no memory info');
-        console.log('[Shape] Current scene children after update:', window.scene ? window.scene.children.length : 'no scene');
-        console.log('[Shape] === PYTHON TO JS VIEWER UPDATE COMPLETE ===');
-        }} else {{
-            console.error('[Shape] loadShapeEditor function not available');
+            console.log('[Shape] Calling loadShapeEditor with data keys:', Object.keys(data));
+            console.log('[Shape] Data validation - active_spheres length:', data.active_spheres.length);
+            
+            try {{
+                window.viewer.loadShapeEditor(data);
+                console.log('[Shape] loadShapeEditor call completed successfully');
+            }} catch (error) {{
+                console.error('[Shape] ERROR in loadShapeEditor:', error);
+                console.error('[Shape] Error stack:', error.stack);
+            }}
+            
+            console.log('[Shape] Current scene children after update:', window.scene ? window.scene.children.length : 'no scene');
+            console.log('[Shape] === PYTHON TO JS VIEWER UPDATE COMPLETE ===');
         }}
         """
         
