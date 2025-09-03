@@ -241,15 +241,19 @@ class ShapeTab(QWidget):
                 if self._deactivate_sphere(viewer_coords):
                     print(f"[Shape] Removed sphere at {viewer_coords}")
                 else:
-                    print(f"[Shape] Failed to remove sphere at {viewer_coords}")
+                    print(f"[Shape] Sphere removal failed for {viewer_coords}")
             else:
-                if self._activate_sphere(viewer_coords):
+                if viewer_coords in self.frontier_spheres:
                     print(f"[Shape] Added sphere at {viewer_coords}")
+                    self.active_spheres.add(viewer_coords)
+                    self.frontier_spheres.remove(viewer_coords)
+                    self._rebuild_frontier()
+                    self._recompute_shift()
+                    self._update_ui()
+                    # Use timer to delay viewer update and prevent race conditions
+                    QTimer.singleShot(100, self._update_viewer)
                 else:
                     print(f"[Shape] Failed to add sphere at {viewer_coords}")
-            
-            self._update_ui()
-            self._update_viewer()
             
         except Exception as e:
             print(f"[Shape] Error handling sphere click: {e}")
@@ -390,15 +394,7 @@ class ShapeTab(QWidget):
         
         self.active_spheres.remove(idx)
     def _reset_to_origin(self):
-        # Auto-save timer and backup
-        self.auto_save_timer = QTimer()
-        self.auto_save_timer.timeout.connect(self._auto_save)
-        self.auto_save_timer.setSingleShot(True)
-        self.last_backup_file = None
-        
-        # Start auto-save timer on first edit
-        self.editing_started = False
-        
+        """Reset to single origin sphere."""
         self.active_spheres.clear()
         self.frontier_spheres.clear()
         
@@ -412,7 +408,10 @@ class ShapeTab(QWidget):
         self._shape_name = "untitled"
         
         self._update_ui()
-        self._update_viewer()
+        
+        # Force viewer reload to ensure it's responsive
+        self._setup_viewer()
+        QTimer.singleShot(1000, self._update_viewer)
     
     def _update_ui(self):
         """Update UI labels and counters."""
@@ -428,7 +427,7 @@ class ShapeTab(QWidget):
         if not hasattr(self, 'viewer'):
             print("[Shape] Viewer not available, skipping update")
             return
-        
+            
         print(f"[Shape] Updating viewer: {len(self.active_spheres)} active, {len(self.frontier_spheres)} frontier")
         
         # Build sphere data for viewer
@@ -474,7 +473,7 @@ class ShapeTab(QWidget):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Shape or Solution File",
-            str(repo_root() / "external" / "solver" / "results"),
+            str(repo_root() / "data" / "containers"),
             "JSON Files (*.json);;All Files (*)"
         )
         
@@ -548,7 +547,9 @@ class ShapeTab(QWidget):
         self._shape_name = file_path.stem
         
         self._update_ui()
-        self._update_viewer()
+        # Force viewer reload to ensure it's responsive after file load
+        self._setup_viewer()
+        QTimer.singleShot(1000, self._update_viewer)
         
         print(f"[Shape] Loaded {len(self.active_spheres)} spheres from {file_path.name}")
         print(f"[Shape] Sample loaded spheres: {list(self.active_spheres)[:5]}")
