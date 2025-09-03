@@ -66,6 +66,9 @@ class SolveTab(QWidget):
         self._world_watch = QFileSystemWatcher(self)
         self._world_debounce = QTimer(self); self._world_debounce.setSingleShot(True); self._world_debounce.setInterval(150)
         self._world_poll = QTimer(self);     self._world_poll.setInterval(1000)
+        
+        # Dynamic snapshot interval (will be updated from solver options)
+        self._snapshot_interval_sec = 10  # default fallback
 
         self._world_watch.fileChanged.connect(lambda _: self._world_debounce.start())
         self._world_watch.directoryChanged.connect(lambda _: self._world_debounce.start())
@@ -108,6 +111,12 @@ class SolveTab(QWidget):
         # Options panel (schema-driven)
         self.opts = OptionsPanel(left)
         lbox.addWidget(self.opts, 1)
+        
+        # Connect to options changes to update snapshot interval
+        # Store original method if it exists, then override
+        if hasattr(self.opts, 'values_changed'):
+            self.opts._original_values_changed = self.opts.values_changed
+        self.opts.values_changed = self._on_solver_options_changed
 
         # Progress stats
         stats = QGroupBox("Progress (auto-follow)", left)
@@ -366,6 +375,7 @@ class SolveTab(QWidget):
         if not self._camfit_done_for_path:
             self._viewer_eval_js("typeof viewer!=='undefined' && viewer.fitOnce && viewer.fitOnce({margin:1.15})")
             self._camfit_done_for_path = True
+            print(f"[Camera] Initial fit applied for: {path}")
 
     def _clear_stats_world_only(self):
         self._update_run_label({})
@@ -671,9 +681,33 @@ class SolveTab(QWidget):
             n = int(n)
         except Exception:
             n = 0
+        # Reveal slider changes should NOT affect camera position
         self._viewer_eval_js(
             f"typeof viewer!=='undefined' && viewer.setRevealCount && viewer.setRevealCount({int(n)})"
         )
+        print(f"[Camera] Reveal changed to {n} - camera position preserved")
+    
+    def _on_solver_options_changed(self):
+        """Called when solver options change - update snapshot interval for viewer sync."""
+        try:
+            values = self.opts.values()
+            snapshot_interval = values.get('snapshot_interval', 10)
+            self._snapshot_interval_sec = int(snapshot_interval)
+            
+            # Update polling intervals to match solver snapshot interval
+            # Convert seconds to milliseconds and add small buffer for responsiveness
+            poll_interval_ms = max(250, self._snapshot_interval_sec * 1000 // 2)
+            
+            self._poll.setInterval(poll_interval_ms)
+            self._poll_timer.setInterval(poll_interval_ms)
+            
+            print(f"[Viewer] Updated polling intervals to {poll_interval_ms}ms (snapshot_interval: {self._snapshot_interval_sec}s)")
+        except Exception as e:
+            print(f"[Viewer] Failed to update snapshot interval: {e}")
+        
+        # Call original values_changed if it exists
+        if hasattr(self.opts, '_original_values_changed'):
+            self.opts._original_values_changed()
 
     def set_world_watch_path(self, path: Path):
         """Start watching the given *.current.world.json for atomic replace updates."""
@@ -701,16 +735,10 @@ class SolveTab(QWidget):
             pass
 
         self._world_path = path
-        self._camfit_done_for_path = False  # Reset “first load” for current world
+        self._camfit_done_for_path = False  # Reset "first load" for current world
         # tell viewer it may fit again for this new container
         self._viewer_eval_js("typeof viewer!=='undefined' && viewer.resetFit && viewer.resetFit()")
-
-        # Optional: first load immediately (or skip if you only want on-change)
-        # self.open_world_file(path)
-
-    def _on_world_file_changed(self, changed_path: str):
-        # The file was replaced/changed; debounce a reload
-        self._world_debounce.start()
+        print(f"[Camera] New world file set, camera fit reset for: {path}")
 
     def _on_world_dir_changed(self, changed_dir: str):
         # Directory change (atomic replace often fires this); debounce a reload
@@ -729,12 +757,8 @@ class SolveTab(QWidget):
         # Reload using the same path you use when you click "Open"
         try:
             self.open_world_file(p)
-            # one-time fit after the first successful load for this path
-            if not self._camfit_done_for_path:
-                self._viewer_eval_js(
-                    "typeof viewer!=='undefined' && viewer.fitOnce && viewer.fitOnce({margin:1.15})"
-                )
-                self._camfit_done_for_path = True
+            # Skip camera fitting on file watcher updates - preserve user camera settings
+            print(f"[Camera] File watcher update - preserving user camera position")
             # keep Reveal count/label in sync
             self.refresh_reveal_total()
         except Exception:
@@ -766,12 +790,8 @@ class SolveTab(QWidget):
         # Reload using the same path you use when you click "Open"
         try:
             self.open_world_file(p)
-            # one-time fit after the first successful load for this path
-            if not self._camfit_done_for_path:
-                self._viewer_eval_js(
-                    "typeof viewer!=='undefined' && viewer.fitOnce && viewer.fitOnce({margin:1.15})"
-                )
-                self._camfit_done_for_path = True
+            # Skip camera fitting on mtime polling updates - preserve user camera settings
+            print(f"[Camera] Mtime polling update - preserving user camera position")
             # keep Reveal count/label in sync
             self.refresh_reveal_total()
         except Exception:

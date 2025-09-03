@@ -234,6 +234,14 @@ function initThree() {
   controls.enablePan = true;
   controls.enableRotate = true;
   controls.enableZoom = true;
+  
+  // Remove polar angle limits to allow full 360° vertical rotation
+  // Note: OrbitControls has inherent limitations due to gimbal lock at poles
+  // Setting to slightly less than full range to avoid camera flip issues
+  controls.minPolarAngle = 0.01; // Nearly straight down (avoid gimbal lock)
+  controls.maxPolarAngle = Math.PI - 0.01; // Nearly straight up (avoid gimbal lock)
+  
+  console.log('[Camera] OrbitControls configured for full 360° rotation in all planes');
 
   // --- Brightness control (v1.3 add) ---
   let ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
@@ -346,9 +354,11 @@ function fitOrthoToBbox(bbox) {
 
   camera.position.set(center.x + longest, center.y + longest, center.z + longest);
   camera.lookAt(center);
+  controls.target.copy(center);
   camera.updateProjectionMatrix();
   __saveZoom();     // capture the initial zoom
   __zoomLocked = true;
+  console.log('[Camera] Initial fit completed, zoom locked');
 }
 
 function clearSceneMeshes() {
@@ -470,55 +480,12 @@ function drawPayload(payload) {
 
   clearSceneMeshes();
 
-  // Zoom persistence
-  let __zoomLocked = false;   // becomes true after the first successful fit
-  let __savedOrthoZoom = null;
-  let __savedPerspDist = null;
-
-  function __saveZoom() {
-    if (!camera) return;
-    if (camera.isOrthographicCamera) {
-      __savedOrthoZoom = camera.zoom;
-    } else {
-      // distance from camera to pivot/target
-      const tgt = controls?.target || new THREE.Vector3();
-      __savedPerspDist = camera.position.distanceTo(tgt);
-    }
-  }
-
-  function __restoreZoom() {
-    if (!camera) return;
-    if (camera.isOrthographicCamera && __savedOrthoZoom != null) {
-      camera.zoom = __savedOrthoZoom;
-      camera.updateProjectionMatrix();
-    } else if (__savedPerspDist != null && controls) {
-      const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
-      camera.position.copy(dir.multiplyScalar(__savedPerspDist).add(controls.target));
-      // no projection change needed for perspective
-    }
-  }
-
-  // Optional: keep the saved zoom in sync with the user’s wheel/dragging
-  controls?.addEventListener('change', () => __saveZoom());
-
-  // Guard your initial fit vs. later refreshes
+  // Camera fitting: only on first load, preserve user settings thereafter
   if (!__zoomLocked) {
     fitOrthoToBbox(bbox);
-    __saveZoom();     // capture the initial zoom
-    __zoomLocked = true;
+    console.log('[Camera] First load - fitting to bounding box');
   } else {
-    // On refresh/reveal/watcher updates: do NOT refit or change zoom
-    __restoreZoom();  // keep user zoom exactly as it was
-  }
-
-  // Skip any later code that recomputes zoom/FOV
-  if (!__zoomLocked) {
-    // existing auto-zoom/FOV code (first time only)
-    __saveZoom();
-    __zoomLocked = true;
-  } else {
-    // later updates should NOT touch zoom/FOV
-    __restoreZoom();
+    console.log('[Camera] Subsequent load - preserving user camera settings');
   }
 
   // a bit smoother for nicer specular highlights (tune if perf dips)
@@ -591,17 +558,24 @@ window.viewer = window.viewer || {};
   }
 
   function _centerAndFitOrtho(margin = 1.15) {
+    if (__zoomLocked) {
+      console.log('[Camera] _centerAndFitOrtho skipped - zoom locked');
+      return false;
+    }
+    
     const box = _sceneBox();
     if (!box) return false;
 
-    // center
+    // center of bounding box becomes the pivot point
     const center = new THREE.Vector3();
     box.getCenter(center);
 
-    // shift camera so target = center without changing view direction
-    const oldTarget = controls.target.clone();
-    const delta = center.clone().sub(oldTarget);
+    // Set controls target to bounding box center for proper rotation pivot
     controls.target.copy(center);
+    
+    // Position camera relative to the new pivot point
+    const oldTarget = new THREE.Vector3(0, 0, 0); // assume previous target was origin
+    const delta = center.clone().sub(oldTarget);
     camera.position.add(delta);
     controls.update();
 
@@ -619,23 +593,31 @@ window.viewer = window.viewer || {};
     const z2 = halfH / (r * margin);
     const zoom = Math.max(0.01, Math.min(z1, z2));
 
-    if (!__zoomLocked) {
-      camera.zoom = zoom;
-      camera.updateProjectionMatrix();
-    }
+    camera.zoom = zoom;
+    camera.updateProjectionMatrix();
+    __saveZoom();
+    __zoomLocked = true;
+    console.log('[Camera] Fitted and locked zoom at', zoom);
 
     return true;
   }
 
   // Public API
   window.viewer.fitOnce = function (opts) {
-    if (_fitDone) return true;
+    if (_fitDone || __zoomLocked) {
+      console.log('[Camera] fitOnce skipped - already fitted or zoom locked');
+      return true;
+    }
     // Try now; if geometry isn’t ready yet, retry a few frames.
     let tries = 0;
     function attempt() {
       tries++;
       const ok = _centerAndFitOrtho((opts && opts.margin) || 1.15);
-      if (ok || tries > 30) { _fitDone = ok; return; }
+      if (ok || tries > 30) { 
+        _fitDone = ok; 
+        if (ok) console.log('[Camera] fitOnce completed successfully');
+        return; 
+      }
       requestAnimationFrame(attempt);
     }
     attempt();
@@ -644,6 +626,248 @@ window.viewer = window.viewer || {};
 
   window.viewer.resetFit = function () {
     _fitDone = false;
+    return true;
+  };
+})();
+
+// ---------- Shape Editor Functions ----------
+(function() {
+  let _shapeEditorMode = false;
+  let _activeSpheres = [];
+  let _frontierSpheres = [];
+  let _hoverSphere = null;
+  let _editColor = 'blue';
+  let _shapeRadius = 0.5;
+  
+  // Raycaster for mouse picking
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2();
+  
+  // Materials for shape editing
+  const _shapeMaterials = {
+    active: null,
+    frontier: null,
+    hover: null
+  };
+  
+  function _initShapeMaterials() {
+    const colors = {
+      red: 0xff4444, blue: 0x4444ff, green: 0x44ff44, yellow: 0xffff44,
+      purple: 0xff44ff, orange: 0xff8844, cyan: 0x44ffff, pink: 0xff88cc
+    };
+    
+    const baseColor = colors[_editColor] || colors.blue;
+    
+    _shapeMaterials.active = new THREE.MeshLambertMaterial({
+      color: baseColor,
+      transparent: false
+    });
+    
+    _shapeMaterials.frontier = new THREE.MeshLambertMaterial({
+      color: baseColor,
+      transparent: true,
+      opacity: 0.3
+    });
+    
+    _shapeMaterials.hover = new THREE.MeshLambertMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.6
+    });
+  }
+  
+  function _clearShapeEditor() {
+    const root = ensureDisplayRoot();
+    // Remove all shape editor objects
+    const toRemove = [];
+    root.traverse(obj => {
+      if (obj.userData?.isShapeEditor) {
+        toRemove.push(obj);
+      }
+    });
+    toRemove.forEach(obj => {
+      if (obj.parent) obj.parent.remove(obj);
+    });
+    
+    if (_hoverSphere) {
+      scene.remove(_hoverSphere);
+      _hoverSphere = null;
+    }
+  }
+  
+  function _buildShapeEditor(data) {
+    _clearShapeEditor();
+    _initShapeMaterials();
+    
+    const root = ensureDisplayRoot();
+    _shapeRadius = data.radius || 0.5;
+    _editColor = data.edit_color || 'blue';
+    _activeSpheres = data.active_spheres || [];
+    _frontierSpheres = data.frontier_spheres || [];
+    
+    // Create active spheres
+    _activeSpheres.forEach((center, idx) => {
+      const geometry = new THREE.SphereGeometry(_shapeRadius, 24, 16);
+      const sphere = new THREE.Mesh(geometry, _shapeMaterials.active);
+      sphere.position.set(center.x, center.y, center.z);
+      sphere.userData.isShapeEditor = true;
+      sphere.userData.shapeType = 'active';
+      sphere.userData.shapeIndex = idx;
+      root.add(sphere);
+    });
+    
+    // Create frontier spheres
+    _frontierSpheres.forEach((center, idx) => {
+      const geometry = new THREE.SphereGeometry(_shapeRadius * 0.85, 16, 12);
+      const sphere = new THREE.Mesh(geometry, _shapeMaterials.frontier);
+      sphere.position.set(center.x, center.y, center.z);
+      sphere.userData.isShapeEditor = true;
+      sphere.userData.shapeType = 'frontier';
+      sphere.userData.shapeIndex = idx;
+      root.add(sphere);
+    });
+    
+    console.log(`[Shape] Loaded ${_activeSpheres.length} active + ${_frontierSpheres.length} frontier spheres`);
+  }
+  
+  function _onMouseMove(event) {
+    if (!_shapeEditorMode) return;
+    
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    
+    raycaster.setFromCamera(mouse, camera);
+    
+    // Find intersections with shape editor objects
+    const root = ensureDisplayRoot();
+    const shapeObjects = [];
+    root.traverse(obj => {
+      if (obj.userData?.isShapeEditor && obj.isMesh) {
+        shapeObjects.push(obj);
+      }
+    });
+    
+    const intersects = raycaster.intersectObjects(shapeObjects);
+    
+    // Remove previous hover sphere
+    if (_hoverSphere) {
+      scene.remove(_hoverSphere);
+      _hoverSphere = null;
+    }
+    
+    if (intersects.length > 0) {
+      const target = intersects[0].object;
+      
+      // Show hover preview
+      const geometry = new THREE.SphereGeometry(_shapeRadius * 1.1, 16, 12);
+      _hoverSphere = new THREE.Mesh(geometry, _shapeMaterials.hover);
+      _hoverSphere.position.copy(target.position);
+      scene.add(_hoverSphere);
+      
+      renderer.domElement.style.cursor = 'pointer';
+    } else {
+      renderer.domElement.style.cursor = 'default';
+    }
+  }
+  
+  function _onMouseClick(event) {
+    if (!_shapeEditorMode) return;
+    
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    
+    raycaster.setFromCamera(mouse, camera);
+    
+    const root = ensureDisplayRoot();
+    const shapeObjects = [];
+    root.traverse(obj => {
+      if (obj.userData?.isShapeEditor && obj.isMesh) {
+        shapeObjects.push(obj);
+      }
+    });
+    
+    const intersects = raycaster.intersectObjects(shapeObjects);
+    
+    if (intersects.length > 0) {
+      const target = intersects[0].object;
+      const shapeType = target.userData.shapeType;
+      const shapeIndex = target.userData.shapeIndex;
+      
+      // Send click event back to Python
+      const clickData = {
+        type: shapeType,
+        index: shapeIndex,
+        position: {
+          x: target.position.x,
+          y: target.position.y,
+          z: target.position.z
+        }
+      };
+      
+      // Call Python callback if available
+      if (window.qt && window.qt.webChannelTransport) {
+        console.log('[Shape] Sphere clicked:', clickData);
+        // Send to Python via web channel
+        new QWebChannel(qt.webChannelTransport, channel => {
+          const bridge = channel.objects.bridge;
+          if (bridge && bridge.onSphereClicked) {
+            bridge.onSphereClicked(JSON.stringify(clickData));
+          }
+        });
+      }
+    }
+  }
+  
+  // Public API
+  window.viewer.loadShapeEditor = function(data) {
+    _shapeEditorMode = true;
+    _buildShapeEditor(data);
+    
+    // Add event listeners
+    renderer.domElement.addEventListener('mousemove', _onMouseMove);
+    renderer.domElement.addEventListener('click', _onMouseClick);
+    
+    // Force camera fit for shape editor - reset zoom lock and use smaller margin
+    __zoomLocked = false;
+    _fitDone = false;
+    window.viewer.fitOnce({ margin: 1.02 });
+    
+    renderer.render(scene, camera);
+    return true;
+  };
+  
+  window.viewer.exitShapeEditor = function() {
+    _shapeEditorMode = false;
+    _clearShapeEditor();
+    
+    // Remove event listeners
+    renderer.domElement.removeEventListener('mousemove', _onMouseMove);
+    renderer.domElement.removeEventListener('click', _onMouseClick);
+    renderer.domElement.style.cursor = 'default';
+    
+    renderer.render(scene, camera);
+    return true;
+  };
+  
+  window.viewer.updateShapeColor = function(colorName) {
+    _editColor = colorName;
+    if (_shapeEditorMode) {
+      _initShapeMaterials();
+      // Update existing spheres
+      const root = ensureDisplayRoot();
+      root.traverse(obj => {
+        if (obj.userData?.isShapeEditor && obj.isMesh) {
+          if (obj.userData.shapeType === 'active') {
+            obj.material = _shapeMaterials.active;
+          } else if (obj.userData.shapeType === 'frontier') {
+            obj.material = _shapeMaterials.frontier;
+          }
+        }
+      });
+      renderer.render(scene, camera);
+    }
     return true;
   };
 })();
@@ -658,8 +882,13 @@ function setupWebChannel() {
       console.error('[viewer] bridge object missing');
       return;
     }
-    bridge.sendPayload.connect(drawPayload);
-    console.log('[viewer] WebChannel connected');
+    // Check if this is the Solve tab bridge (has sendPayload) or Shape tab bridge
+    if (bridge.sendPayload && bridge.sendPayload.connect) {
+      bridge.sendPayload.connect(drawPayload);
+      console.log('[viewer] WebChannel connected (Solve tab)');
+    } else {
+      console.log('[viewer] WebChannel connected (Shape tab)');
+    }
   });
 }
 

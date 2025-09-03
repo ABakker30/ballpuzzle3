@@ -25,9 +25,11 @@ if __package__ is None or __package__ == "":
 # Try relative imports first (module mode), fall back to local (script mode)
 try:
     from .components.solve_tab import SolveTab  # type: ignore
+    from .components.shape_tab import ShapeTab  # type: ignore
     from .utils import repo_root, win_quote       # type: ignore
 except Exception:  # ImportError or ValueError (no package)
     from components.solve_tab import SolveTab
+    from components.shape_tab import ShapeTab
     from utils import repo_root, win_quote
 # ---------------------------------------------------------------------------
 
@@ -106,14 +108,14 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.solve_tab, "Solve")
         from apps.puzzle_ui.ui.components.studio_tab import StudioTab
         self.tabs.addTab(StudioTab(self), "Studio")
+        
+        # Shape editor tab
+        self.shape_tab = ShapeTab(self)
+        self.tabs.addTab(self.shape_tab, "Shape")
 
         mint = QWidget(self); mv = QVBoxLayout(mint)
         mv.addWidget(QLabel("Mint Solution (placeholder)\n\nWill collect metadata, connect wallet, submit tx, and show receipt.", mint)); mv.addStretch(1)
         self.tabs.addTab(mint, "Mint Solution")
-
-        builder = QWidget(self); bv = QVBoxLayout(builder)
-        bv.addWidget(QLabel("Container Builder (placeholder)\n\nWill author/validate container JSON.", builder)); bv.addStretch(1)
-        self.tabs.addTab(builder, "Container Builder")
 
         v.addLayout(top); v.addWidget(self.tabs, 1)
 
@@ -269,7 +271,7 @@ class MainWindow(QMainWindow):
             return False
 
     def _pick_world_file(self):
-        start_dir = str((repo_root() / "samples").resolve())
+        start_dir = str((repo_root() / "external" / "solver" / "results").resolve())
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Open world JSON", start_dir,
             "World JSON (*.current.world.json *.world.json *.json);;All Files (*)",

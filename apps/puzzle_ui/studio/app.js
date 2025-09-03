@@ -361,9 +361,29 @@ function applyBrightness(factor) {
   if (renderer && camera) renderer.render(scene, camera);
 }
 
+// Brightness persistence
+const BRIGHTNESS_KEY = "studio.brightness.v1";
+
+function saveBrightness(factor) {
+  localStorage.setItem(BRIGHTNESS_KEY, JSON.stringify(factor));
+}
+
+function loadBrightness() {
+  const saved = localStorage.getItem(BRIGHTNESS_KEY);
+  if (saved) {
+    try {
+      return JSON.parse(saved);
+    } catch (e) {
+      console.log('Failed to parse saved brightness:', e);
+    }
+  }
+  return 1.0; // default
+}
+
 // Exposed to PyQt
 window.setStudioBrightness = function(factor) {
   applyBrightness(factor);
+  saveBrightness(factor);
 };
 
 function init(){
@@ -401,6 +421,10 @@ function init(){
   DIR_LIGHT = new THREE.DirectionalLight(0xffffff, __baseDir);
   DIR_LIGHT.position.set(10,12,8);
   scene.add(DIR_LIGHT);
+
+  // Load and apply saved brightness
+  const savedBrightness = loadBrightness();
+  applyBrightness(savedBrightness);
 
   window.addEventListener('resize', onResize);
   animate();
@@ -493,6 +517,13 @@ function _stepAnimation() {
   if (!__anim) return;
   if (__anim.kind === 'bottomup') _stepAssembleBottomUp();
   else if (__anim.kind === 'orbitxy') _stepOrbitXY();
+  else if (__anim.kind === 'puzzle-shape') {
+    if (__anim.phase === 'collapse') {
+      _stepPuzzleShapeCollapse();
+    } else {
+      _stepPuzzleShape();
+    }
+  }
 }
 
 function animate(){
@@ -876,6 +907,577 @@ function studioPlayAssembleBottomUp(durationSec) {
   };
 };
 
+// Puzzle Shape: Physics-based container formation
+function studioPlayPuzzleShape(settings) {
+  // Handle both old (durationSec, material) and new (settings object) signatures
+  if (typeof settings === 'number' || typeof settings === 'string') {
+    settings = {
+      duration: arguments[0] || 15,
+      material: arguments[1] || 'metallic',
+      scatterRadius: 15,
+      collisionRadius: 2.2,
+      avoidanceStrength: 2.0,
+      colorStrategy: 'golden-3band'
+    };
+  }
+  
+  const groups = _pieceGroups();
+  if (!groups.length) { studioStatus("Studio: no pieces to animate"); return; }
+
+  // Collect all individual spheres with their world positions from file
+  const allSpheres = [];
+  groups.forEach((group, groupIndex) => {
+    group.traverse(obj => {
+      if (obj.isMesh && obj.userData?.isAtom) {
+        // Get the world position (this forms the puzzle shape)
+        const worldPos = new THREE.Vector3();
+        obj.getWorldPosition(worldPos);
+        allSpheres.push({
+          mesh: obj,
+          originalWorldPos: worldPos.clone(), // Original world position from file
+          targetPos: worldPos.clone(), // Target is the world position (forms shape)
+          group: group,
+          groupIndex: groupIndex
+        });
+      }
+    });
+  });
+
+  if (!allSpheres.length) {
+    studioStatus("Studio: no spheres found");
+    return;
+  }
+
+  // Target positions are the original world positions (forms the puzzle shape)
+  allSpheres.forEach(sphere => {
+    sphere.targetPos = sphere.originalWorldPos.clone();
+  });
+
+  // Set up random cloud start state
+  const center = calculateCentroid(allSpheres.map(s => {
+    const worldPos = new THREE.Vector3();
+    s.mesh.getWorldPosition(worldPos);
+    return worldPos;
+  }));
+  
+  allSpheres.forEach((sphere, sphereIndex) => {
+    // Random position in cloud around center
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const r = Math.random() * settings.scatterRadius;
+    
+    const worldStartPos = new THREE.Vector3(
+      center.x + r * Math.sin(phi) * Math.cos(theta),
+      center.y + r * Math.sin(phi) * Math.sin(theta),
+      center.z + r * Math.cos(phi)
+    );
+    
+    // Store world positions for animation
+    sphere.startPos = worldStartPos.clone();
+    
+    // Apply material based on color strategy or uniform material
+    if (settings.colorStrategy && settings.colorStrategy !== 'uniform') {
+      // Use app's color palette
+      const colorFn = COLOR_STRATEGIES[settings.colorStrategy] || COLOR_STRATEGIES['golden-3band'];
+      const color = colorFn(sphere.group.name || String(sphere.groupIndex), sphere.groupIndex, groups.length);
+      sphere.mesh.material = new THREE.MeshStandardMaterial({ 
+        color: color, 
+        metalness: 0.2, 
+        roughness: 0.45 
+      });
+    } else {
+      // Use uniform material
+      sphere.mesh.material = createPuzzleShapeMaterial(settings.material);
+    }
+  });
+
+  // Hide all bonds for this animation - traverse entire scene
+  const root = scene.getObjectByName("DISPLAY_ROOT");
+  if (root) {
+    root.traverse(obj => {
+      if (obj.userData?.isBond) {
+        obj.visible = false;
+      }
+    });
+  }
+
+  __anim = {
+    kind: 'puzzle-shape',
+    start: performance.now(),
+    duration: Math.max(1000, settings.duration * 1000),
+    spheres: allSpheres,
+    settings: settings
+  };
+
+  studioStatus(`Studio: forming puzzle shape with ${allSpheres.length} spheres (${settings.colorStrategy || settings.material})`);
+}
+
+// Calculate convex hull of points (simplified 3D hull)
+function calculateConvexHull(points) {
+  if (points.length < 4) return points;
+  
+  // For simplicity, use bounding box vertices as hull approximation
+  const bbox = new THREE.Box3().setFromPoints(points);
+  const corners = [
+    new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.min.z),
+    new THREE.Vector3(bbox.max.x, bbox.min.y, bbox.min.z),
+    new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.min.z),
+    new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.min.z),
+    new THREE.Vector3(bbox.min.x, bbox.min.y, bbox.max.z),
+    new THREE.Vector3(bbox.max.x, bbox.min.y, bbox.max.z),
+    new THREE.Vector3(bbox.min.x, bbox.max.y, bbox.max.z),
+    new THREE.Vector3(bbox.max.x, bbox.max.y, bbox.max.z)
+  ];
+  
+  // Add some surface points for better shape
+  const surfacePoints = [];
+  for (let i = 0; i < points.length; i += Math.max(1, Math.floor(points.length / 20))) {
+    surfacePoints.push(points[i]);
+  }
+  
+  return [...corners, ...surfacePoints];
+}
+
+// Assign target positions to spheres
+function assignTargetPositions(spheres, hullPoints) {
+  spheres.forEach((sphere, i) => {
+    // Distribute spheres among hull points
+    const targetIdx = i % hullPoints.length;
+    sphere.targetPos = hullPoints[targetIdx].clone();
+    
+    // Add small random offset to prevent exact overlap
+    const offset = new THREE.Vector3(
+      (Math.random() - 0.5) * 2,
+      (Math.random() - 0.5) * 2,
+      (Math.random() - 0.5) * 2
+    );
+    sphere.targetPos.add(offset);
+  });
+}
+
+// Calculate centroid of points
+function calculateCentroid(points) {
+  const center = new THREE.Vector3();
+  points.forEach(p => center.add(p));
+  center.divideScalar(points.length);
+  return center;
+}
+
+// Create material for puzzle shape spheres
+function createPuzzleShapeMaterial(materialType) {
+  const materials = {
+    metallic: new THREE.MeshStandardMaterial({ 
+      color: 0x888888, metalness: 0.8, roughness: 0.2 
+    }),
+    glass: new THREE.MeshPhysicalMaterial({ 
+      color: 0x88ccff, transmission: 0.9, opacity: 0.8, transparent: true 
+    }),
+    plastic: new THREE.MeshStandardMaterial({ 
+      color: 0xff6644, metalness: 0.1, roughness: 0.6 
+    }),
+    gold: new THREE.MeshStandardMaterial({ 
+      color: 0xffd700, metalness: 0.9, roughness: 0.1 
+    }),
+    chrome: new THREE.MeshStandardMaterial({ 
+      color: 0xffffff, metalness: 1.0, roughness: 0.05, envMapIntensity: 1.5 
+    }),
+    matte: new THREE.MeshLambertMaterial({ 
+      color: 0x666666 
+    })
+  };
+  
+  return materials[materialType] || materials.chrome;
+}
+
+// Puzzle Shape Settings Panel (similar to snuggle dialog)
+const PUZZLE_SHAPE_KEY = "studio.puzzleshape.cfg.v1";
+
+function getPuzzleShapeDefaults() {
+  return {
+    duration: 15,
+    scatterRadius: 15,
+    collisionRadius: 2.2,
+    avoidanceStrength: 2.0,
+    colorStrategy: 'golden-3band',
+    material: 'chrome',
+    collapseDelay: 2.0,
+    gravity: 9.8,
+    bounce: 0.3,
+    damping: 0.85
+  };
+}
+
+function openPuzzleShapeDialog() {
+  const cfg = getPuzzleShapeDefaults();
+  const colorStrategies = Object.keys(COLOR_STRATEGIES);
+  const materials = ['chrome', 'metallic', 'glass', 'plastic', 'gold', 'matte'];
+  
+  // Create modal backdrop
+  const backdrop = document.createElement('div');
+  backdrop.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:10000;display:flex;align-items:center;justify-content:center;';
+  
+  // Create modal content
+  const modal = document.createElement('div');
+  modal.style.cssText = 'background:#2a2a2a;border-radius:12px;padding:24px;max-width:500px;width:90%;color:#fff;font:14px/1.4 system-ui;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
+  
+  modal.innerHTML = `
+    <h3 style="margin:0 0 20px 0;color:#4a9eff;">Puzzle: Shape Formation Settings</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Duration (seconds)</label>
+        <input type="number" id="shape-duration" min="5" max="60" step="0.5" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Scatter Radius</label>
+        <input type="number" id="shape-scatter" min="5" max="50" step="1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Collision Radius</label>
+        <input type="number" id="shape-collision" min="0.5" max="5.0" step="0.1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Avoidance Strength</label>
+        <input type="number" id="shape-avoidance" min="0.5" max="10.0" step="0.1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Collapse Delay (seconds)</label>
+        <input type="number" id="shape-collapse-delay" min="0.5" max="10" step="0.5" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Gravity Strength</label>
+        <input type="number" id="shape-gravity" min="1" max="20" step="0.5" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Bounce Factor</label>
+        <input type="number" id="shape-bounce" min="0" max="1" step="0.1" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Damping Factor</label>
+        <input type="number" id="shape-damping" min="0.1" max="1" step="0.05" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Color Strategy</label>
+        <select id="shape-color" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+          ${colorStrategies.map(strategy => `<option value="${strategy}">${strategy}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <label style="display:block;margin-bottom:8px;font-weight:500;">Material Type</label>
+        <select id="shape-material" style="width:100%;padding:6px;border:1px solid #555;border-radius:4px;background:#333;color:#fff;">
+          ${materials.map(material => `<option value="${material}">${material}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div style="display:flex;gap:12px;margin-top:24px;justify-content:flex-end;">
+      <button id="shape-reset" style="padding:8px 16px;border:1px solid #666;border-radius:6px;background:#444;color:#fff;cursor:pointer;">Reset</button>
+      <button id="shape-cancel" style="padding:8px 16px;border:1px solid #666;border-radius:6px;background:#444;color:#fff;cursor:pointer;">Cancel</button>
+      <button id="shape-run" style="padding:8px 16px;border:1px solid #4a9eff;border-radius:6px;background:#4a9eff;color:#fff;cursor:pointer;font-weight:500;">Run</button>
+    </div>
+  `;
+  
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+  
+  // Set values after DOM insertion
+  modal.querySelector('#shape-duration').value = cfg.duration;
+  modal.querySelector('#shape-scatter').value = cfg.scatterRadius;
+  modal.querySelector('#shape-collision').value = cfg.collisionRadius;
+  modal.querySelector('#shape-avoidance').value = cfg.avoidanceStrength;
+  modal.querySelector('#shape-collapse-delay').value = cfg.collapseDelay || 2.0;
+  modal.querySelector('#shape-gravity').value = cfg.gravity || 9.8;
+  modal.querySelector('#shape-bounce').value = cfg.bounce || 0.3;
+  modal.querySelector('#shape-damping').value = cfg.damping || 0.85;
+  modal.querySelector('#shape-color').value = cfg.colorStrategy;
+  modal.querySelector('#shape-material').value = cfg.material;
+  
+  // Event handlers
+  const resetBtn = modal.querySelector('#shape-reset');
+  const cancelBtn = modal.querySelector('#shape-cancel');
+  const runBtn = modal.querySelector('#shape-run');
+  
+  resetBtn.addEventListener('click', () => {
+    localStorage.removeItem(PUZZLE_SHAPE_KEY);
+    const defaults = getPuzzleShapeDefaults();
+    modal.querySelector('#shape-duration').value = defaults.duration;
+    modal.querySelector('#shape-scatter').value = defaults.scatterRadius;
+    modal.querySelector('#shape-collision').value = defaults.collisionRadius;
+    modal.querySelector('#shape-avoidance').value = defaults.avoidanceStrength;
+    modal.querySelector('#shape-collapse-delay').value = defaults.collapseDelay || 2.0;
+    modal.querySelector('#shape-gravity').value = defaults.gravity || 9.8;
+    modal.querySelector('#shape-bounce').value = defaults.bounce || 0.3;
+    modal.querySelector('#shape-damping').value = defaults.damping || 0.85;
+    modal.querySelector('#shape-color').value = defaults.colorStrategy;
+    modal.querySelector('#shape-material').value = defaults.material;
+    studioStatus('Puzzle shape settings reset to defaults');
+  });
+  
+  cancelBtn.addEventListener('click', () => {
+    document.body.removeChild(backdrop);
+  });
+  
+  runBtn.addEventListener('click', (e) => {
+    if (runBtn.disabled) return;
+    runBtn.disabled = true;
+    runBtn.textContent = 'Running...';
+    
+    // Collect settings
+    const settings = {
+      duration: +modal.querySelector('#shape-duration').value || 15,
+      scatterRadius: +modal.querySelector('#shape-scatter').value || 15,
+      collisionRadius: +modal.querySelector('#shape-collision').value || 2.2,
+      avoidanceStrength: +modal.querySelector('#shape-avoidance').value || 2.0,
+      colorStrategy: modal.querySelector('#shape-color').value || 'golden-3band',
+      material: modal.querySelector('#shape-material').value || 'chrome',
+      enableCollapse: true,
+      collapseDelay: +modal.querySelector('#shape-collapse-delay').value || 2.0,
+      gravity: +modal.querySelector('#shape-gravity').value || 9.8,
+      bounce: +modal.querySelector('#shape-bounce').value || 0.3,
+      damping: +modal.querySelector('#shape-damping').value || 0.85,
+      fallDuration: 3.0     // Duration of physics fall
+    };
+    
+    // Save to localStorage
+    localStorage.setItem(PUZZLE_SHAPE_KEY, JSON.stringify(settings));
+    
+    // Close modal
+    document.body.removeChild(backdrop);
+    
+    // Start animation
+    window.studioPlayPuzzleShape?.(settings);
+  });
+  
+  // Close on backdrop click
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) {
+      document.body.removeChild(backdrop);
+    }
+  });
+}
+
+// Step puzzle shape animation
+function _stepPuzzleShape() {
+  if (!__anim || __anim.kind !== 'puzzle-shape') return;
+  
+  const now = performance.now();
+  const elapsed = now - __anim.start;
+  const progress = Math.min(1, elapsed / __anim.duration);
+  
+  // Check for phase transitions - allocate time between formation and collapse
+  const formationRatio = 0.4; // 40% of time for formation, 60% for collapse
+  const formationDuration = __anim.duration * formationRatio;
+  const sphereProgress = Math.min(1, elapsed / formationDuration);
+  
+  // Get sphere radius for collision detection
+  const sphereRadius = __anim.spheres[0]?.mesh.geometry?.parameters?.radius || 0.5;
+  const collisionRadius = sphereRadius * (__anim.settings?.collisionRadius || 2.2);
+  
+  __anim.spheres.forEach((sphere, index) => {
+    const startPos = sphere.startPos;
+    const targetPos = sphere.targetPos;
+    
+    // Smooth easing without oscillation
+    const easeProgress = 1 - Math.pow(1 - progress, 2.5); // Smoother ease-out
+    
+    // Base interpolated position
+    let currentWorldPos = new THREE.Vector3().lerpVectors(startPos, targetPos, easeProgress);
+    
+    // Collision avoidance - check against other spheres
+    const avoidanceForce = new THREE.Vector3();
+    __anim.spheres.forEach((otherSphere, otherIndex) => {
+      if (index === otherIndex) return;
+      
+      // Get other sphere's current position
+      const otherStartPos = otherSphere.startPos;
+      const otherTargetPos = otherSphere.targetPos;
+      const otherCurrentPos = new THREE.Vector3().lerpVectors(otherStartPos, otherTargetPos, easeProgress);
+      
+      // Calculate distance and avoidance
+      const distance = currentWorldPos.distanceTo(otherCurrentPos);
+      if (distance < collisionRadius && distance > 0.001) {
+        // Calculate avoidance direction
+        const avoidDirection = new THREE.Vector3()
+          .subVectors(currentWorldPos, otherCurrentPos)
+          .normalize();
+        
+        // Stronger avoidance when closer
+        const avoidStrength = (collisionRadius - distance) / collisionRadius;
+        const maxAvoidance = __anim.settings?.avoidanceStrength || 2.0;
+        
+        avoidanceForce.add(avoidDirection.multiplyScalar(avoidStrength * maxAvoidance));
+      }
+    });
+    
+    // Apply avoidance force with falloff as animation progresses
+    const avoidanceFalloff = Math.max(0, 1 - progress * 1.5); // Reduce avoidance near end
+    currentWorldPos.add(avoidanceForce.multiplyScalar(avoidanceFalloff));
+    
+    // Convert world position to local position for the mesh
+    const groupWorldMatrix = sphere.group.matrixWorld.clone();
+    const groupWorldMatrixInverse = groupWorldMatrix.invert();
+    const localPos = currentWorldPos.clone().applyMatrix4(groupWorldMatrixInverse);
+    
+    sphere.mesh.position.copy(localPos);
+  });
+  
+  // Check for phase transitions
+  if (progress >= 1 && __anim.settings?.enableCollapse && !__anim.phase) {
+    // Transition to collapse phase
+    __anim.phase = 'collapse';
+    __anim.collapseStart = now;
+    __anim.collapseWaitDuration = (__anim.settings.collapseDelay || 2) * 1000;
+    
+    // Find a sphere on XY plane to disturb
+    const xyPlaneThreshold = 2.0;
+    const xySpheres = __anim.spheres.filter(sphere => {
+      const worldPos = new THREE.Vector3();
+      sphere.mesh.getWorldPosition(worldPos);
+      return Math.abs(worldPos.z) < xyPlaneThreshold;
+    });
+    
+    if (xySpheres.length > 0) {
+      __anim.disturbedSphere = xySpheres[Math.floor(Math.random() * xySpheres.length)];
+    }
+    
+    studioStatus("Studio: shape formed - preparing collapse...");
+    return; // Don't end animation yet
+  } else if (progress >= 1 && !__anim.settings?.enableCollapse) {
+    __anim = null;
+    studioStatus("Studio: puzzle shape formation complete - bonds remain hidden");
+  }
+}
+
+// Handle collapse phase of puzzle shape animation
+function _stepPuzzleShapeCollapse() {
+  if (!__anim || __anim.kind !== 'puzzle-shape' || __anim.phase !== 'collapse') return;
+  
+  const now = performance.now();
+  const collapseElapsed = now - __anim.collapseStart;
+  
+  if (collapseElapsed < __anim.collapseWaitDuration) {
+    // Waiting phase - shape holds steady
+    return;
+  }
+  
+  const fallElapsed = collapseElapsed - __anim.collapseWaitDuration;
+  const fallProgress = Math.min(1, fallElapsed / __anim.fallDuration);
+  
+  if (fallProgress === 0) {
+    // Initialize physics for all spheres
+    __anim.spheres.forEach(sphere => {
+      sphere.velocity = new THREE.Vector3();
+      sphere.grounded = false;
+    });
+    
+    // Remove one sphere to trigger collapse
+    if (__anim.disturbedSphere) {
+      __anim.disturbedSphere.mesh.visible = false;
+      studioStatus("Studio: sphere removed - structure collapsing...");
+    }
+  }
+  
+  // Apply gravity and collision physics to all remaining spheres
+  const dt = 0.016; // Fixed timestep
+  const gravity = -(__anim.settings.gravity || 9.8);
+  const damping = __anim.settings.damping || 0.85;
+  const bounce = __anim.settings.bounce || 0.3;
+  const sphereRadius = __anim.spheres[0]?.mesh.geometry?.parameters?.radius || 0.5;
+  
+  __anim.spheres.forEach((sphere, index) => {
+    if (!sphere.mesh.visible) return; // Skip removed sphere
+    
+    // Get current world position
+    const worldPos = new THREE.Vector3();
+    sphere.mesh.getWorldPosition(worldPos);
+    
+    // Initialize velocity if needed
+    if (!sphere.velocity) sphere.velocity = new THREE.Vector3();
+    
+    // Apply gravity
+    sphere.velocity.z += gravity * dt;
+    
+    // Add horizontal spreading forces during fall
+    if (!sphere.grounded) {
+      const horizontalForce = new THREE.Vector3(
+        (Math.random() - 0.5) * 2,
+        (Math.random() - 0.5) * 2,
+        0
+      );
+      sphere.velocity.add(horizontalForce.multiplyScalar(dt));
+    }
+    
+    // Sphere-to-sphere collisions
+    __anim.spheres.forEach((otherSphere, otherIndex) => {
+      if (index === otherIndex || !otherSphere.mesh.visible) return;
+      
+      const otherWorldPos = new THREE.Vector3();
+      otherSphere.mesh.getWorldPosition(otherWorldPos);
+      
+      const distance = worldPos.distanceTo(otherWorldPos);
+      const minDistance = sphereRadius * 2;
+      
+      if (distance < minDistance && distance > 0.001) {
+        // Collision response with stronger horizontal push
+        const normal = new THREE.Vector3().subVectors(worldPos, otherWorldPos).normalize();
+        const overlap = minDistance - distance;
+        
+        // Stronger horizontal forces to encourage spreading
+        normal.x *= 2.0;
+        normal.y *= 2.0;
+        normal.z *= 0.5;
+        
+        const pushForce = normal.multiplyScalar(overlap * 100);
+        sphere.velocity.add(pushForce.multiplyScalar(dt));
+      }
+    });
+    
+    // Update position
+    const newWorldPos = worldPos.add(sphere.velocity.clone().multiplyScalar(dt));
+    
+    // Ground collision (world Z = 0)
+    if (newWorldPos.z <= sphereRadius) {
+      newWorldPos.z = sphereRadius;
+      sphere.velocity.multiplyScalar(damping);
+      if (sphere.velocity.z < 0) {
+        sphere.velocity.z *= -bounce;
+      }
+      
+      // Stop small bounces
+      if (Math.abs(sphere.velocity.z) < 0.5) {
+        sphere.velocity.z = 0;
+        sphere.grounded = true;
+      }
+      
+      // Add some spreading on ground contact
+      if (!sphere.hasSpread) {
+        const spreadForce = new THREE.Vector3(
+          (Math.random() - 0.5) * 8,
+          (Math.random() - 0.5) * 8,
+          0
+        );
+        sphere.velocity.add(spreadForce);
+        sphere.hasSpread = true;
+      }
+    }
+    
+    // Convert back to local coordinates
+    const groupWorldMatrix = sphere.group.matrixWorld.clone();
+    const groupWorldMatrixInverse = groupWorldMatrix.invert();
+    const localPos = newWorldPos.clone().applyMatrix4(groupWorldMatrixInverse);
+    
+    sphere.mesh.position.copy(localPos);
+  });
+  
+  // End animation based on total elapsed time from start
+  const totalElapsed = now - __anim.start;
+  const totalDuration = __anim.duration; // Use the UI-specified duration
+  const totalProgress = totalElapsed / totalDuration;
+  
+  if (totalProgress >= 1) {
+    __anim = null;
+    studioStatus("Studio: animation complete - spheres settled on XY plane");
+  }
+}
+
 // Optional: stop
 function studioStopAnimation(){
   __anim = null;
@@ -888,6 +1490,8 @@ window.setStudioBrightness     = window.setStudioBrightness     || setStudioBrig
 window.studioLoadJson          = window.studioLoadJson          || studioLoadJson;
 window.studioPlayAssembleBottomUp = window.studioPlayAssembleBottomUp || studioPlayAssembleBottomUp;
 window.studioPlayOrbitXY          = window.studioPlayOrbitXY          || studioPlayOrbitXY;
+window.studioPlayPuzzleShape      = window.studioPlayPuzzleShape      || studioPlayPuzzleShape;
+window.openPuzzleShapeDialog      = window.openPuzzleShapeDialog      || openPuzzleShapeDialog;
 window.setStudioOrientation    = window.setStudioOrientation    || setStudioOrientation;
 
 // boot
@@ -1172,6 +1776,14 @@ function setupUnifiedAnimationUI() {
             window.studioPlayOrbitXY?.(+dur);
           }
         });
+      } else if (val === "puzzle-shape") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!playBtn.__shapeDialogOpen) {
+          playBtn.__shapeDialogOpen = true;
+          window.openPuzzleShapeDialog();
+          setTimeout(() => { playBtn.__shapeDialogOpen = false; }, 100);
+        }
       }
     });
   }
