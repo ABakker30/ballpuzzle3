@@ -74,11 +74,6 @@ class ShapeTab(QWidget):
         self.shift = (0, 0, 0)  # Dynamic shift to keep coordinates positive
         self.parity_target = 0  # Even parity constraint
         
-        # Emergency backup system
-        self.sphere_backup = set()
-        self.backup_timer = QTimer()
-        self.backup_timer.timeout.connect(self._backup_spheres)
-        self.backup_timer.start(2000)  # Backup every 2 seconds
         
         # Current file info
         self._current_file: Optional[Path] = None
@@ -154,11 +149,6 @@ class ShapeTab(QWidget):
         self.chk_show_neighbors.toggled.connect(self._on_neighbors_toggled)
         color_layout.addWidget(self.chk_show_neighbors)
         
-        # Emergency restore button
-        btn_restore = QPushButton("Restore Backup", edit_group)
-        btn_restore.clicked.connect(self._restore_backup)
-        btn_restore.setStyleSheet("QPushButton { background-color: #ff6b6b; color: white; font-weight: bold; }")
-        edit_layout.addWidget(btn_restore)
         
         edit_layout.addLayout(color_layout)
         
@@ -405,6 +395,12 @@ class ShapeTab(QWidget):
             return False
         
         self.active_spheres.remove(idx)
+        self._rebuild_frontier()
+        self._recompute_shift()
+        self._update_ui()
+        # Use timer to delay viewer update and prevent race conditions
+        QTimer.singleShot(100, self._update_viewer)
+        return True
     def _reset_to_origin(self):
         """Reset to single origin sphere."""
         self.active_spheres.clear()
@@ -440,29 +436,53 @@ class ShapeTab(QWidget):
             print("[Shape] Viewer not available, skipping update")
             return
             
-        print(f"[Shape] Updating viewer: {len(self.active_spheres)} active, {len(self.frontier_spheres)} frontier")
+        print(f"[Shape] === VIEWER UPDATE START ===")
+        print(f"[Shape] Active spheres count: {len(self.active_spheres)}")
+        print(f"[Shape] Frontier spheres count: {len(self.frontier_spheres)}")
+        print(f"[Shape] Active spheres: {sorted(list(self.active_spheres))}")
+        if len(self.active_spheres) >= 15:
+            print(f"[Shape] WARNING: Approaching critical sphere count of 16!")
+        print(f"[Shape] Current shift: {self.shift}")
         
         # Build sphere data for viewer
         active_spheres = []
         for viewer_coords in self.active_spheres:
             x, y, z = self._viewer_to_display(viewer_coords)
-            active_spheres.append({"x": x, "y": y, "z": z})
-            if len(active_spheres) <= 3:  # Debug first few spheres
+            # Validate coordinate conversion
+            if not all(isinstance(coord, (int, float)) for coord in [x, y, z]):
+                print(f"[Shape] ERROR: Invalid coordinate conversion for {viewer_coords} -> ({x}, {y}, {z})")
+                continue
+            active_spheres.append({"x": float(x), "y": float(y), "z": float(z)})
+            if len(active_spheres) <= 5:  # Debug first few spheres
                 print(f"[Shape] Viewer {viewer_coords} -> Display ({x}, {y}, {z})")
         
         frontier_spheres = []
         for viewer_coords in self.frontier_spheres:
             x, y, z = self._viewer_to_display(viewer_coords)
-            frontier_spheres.append({"x": x, "y": y, "z": z})
+            # Validate coordinate conversion for frontier spheres too
+            if not all(isinstance(coord, (int, float)) for coord in [x, y, z]):
+                print(f"[Shape] ERROR: Invalid frontier coordinate conversion for {viewer_coords} -> ({x}, {y}, {z})")
+                continue
+            frontier_spheres.append({"x": float(x), "y": float(y), "z": float(z)})
         
         # Get current color (with fallback)
         color_name = "blue"  # default
         if hasattr(self, 'combo_color'):
             color_name = self.combo_color.currentText()
         
-        # Send to viewer
+        # Send to viewer with comprehensive debugging
         js_code = f"""
-        console.log('[Shape] Updating viewer with', {len(active_spheres)}, 'active spheres');
+        console.log('[Shape] === PYTHON TO JS VIEWER UPDATE START ===');
+        console.log('[Shape] Python sending data:');
+        console.log('[Shape]   - Active spheres count:', {len(active_spheres)});
+        console.log('[Shape]   - Frontier spheres count:', {len(frontier_spheres)});
+        console.log('[Shape]   - Radius:', {self.RADIUS});
+        console.log('[Shape]   - Color:', '{color_name}');
+        console.log('[Shape]   - Show neighbors:', {str(self.chk_show_neighbors.isChecked()).lower()});
+        console.log('[Shape]   - Current scene children before update:', window.scene ? window.scene.children.length : 'no scene');
+        console.log('[Shape] First 3 active spheres:', {json.dumps(active_spheres[:3])});
+        console.log('[Shape] Memory usage before update:', window.performance ? window.performance.memory : 'no memory info');
+        
         if (window.viewer && window.viewer.loadShapeEditor) {{
            data = {{
             'active_spheres': {json.dumps(active_spheres)},
@@ -471,13 +491,27 @@ class ShapeTab(QWidget):
             'radius': {self.RADIUS},
             'edit_color': "{color_name}"
         }};
-        window.viewer.loadShapeEditor(data);
+        console.log('[Shape] Calling loadShapeEditor with data keys:', Object.keys(data));
+        console.log('[Shape] Data validation - active_spheres length:', data.active_spheres.length);
+        
+        try {{
+            window.viewer.loadShapeEditor(data);
+            console.log('[Shape] loadShapeEditor call completed successfully');
+        }} catch (error) {{
+            console.error('[Shape] ERROR in loadShapeEditor:', error);
+            console.error('[Shape] Error stack:', error.stack);
+        }}
+        
+        console.log('[Shape] Memory usage after update:', window.performance ? window.performance.memory : 'no memory info');
+        console.log('[Shape] Current scene children after update:', window.scene ? window.scene.children.length : 'no scene');
+        console.log('[Shape] === PYTHON TO JS VIEWER UPDATE COMPLETE ===');
         }} else {{
             console.error('[Shape] loadShapeEditor function not available');
         }}
         """
         
         self._viewer_eval_js(js_code)
+        print(f"[Shape] === VIEWER UPDATE END ===")
     
     # Event handlers
     def _on_open_file(self):
@@ -623,24 +657,6 @@ class ShapeTab(QWidget):
         """Toggle visibility of frontier spheres."""
         self._update_viewer()
     
-    def _backup_spheres(self):
-        """Backup current sphere state."""
-        if len(self.active_spheres) > 1:  # Only backup if we have more than just origin
-            self.sphere_backup = self.active_spheres.copy()
-            print(f"[Shape] Backed up {len(self.sphere_backup)} spheres")
-    
-    def _restore_backup(self):
-        """Restore spheres from backup."""
-        if self.sphere_backup:
-            self.active_spheres = self.sphere_backup.copy()
-            self._rebuild_frontier()
-            self._recompute_shift()
-            self._update_ui()
-            self._update_viewer()
-            print(f"[Shape] Restored {len(self.active_spheres)} spheres from backup")
-            QMessageBox.information(self, "Backup Restored", f"Restored {len(self.active_spheres)} spheres from backup")
-        else:
-            QMessageBox.warning(self, "No Backup", "No backup available to restore")
 
 
 class ShapeEditorBridge(QObject):

@@ -639,9 +639,11 @@ window.viewer = window.viewer || {};
   let _hoverSphere = null;
   let _editColor = 'blue';
   let _shapeRadius = 0.5;
+  let _showNeighbors = true;
   
   // Raycaster for mouse picking
   const raycaster = new THREE.Raycaster();
+  raycaster.params.Points.threshold = 0.1;
   const mouse = new THREE.Vector2();
   
   // Materials for shape editing
@@ -702,46 +704,126 @@ window.viewer = window.viewer || {};
     }
   }
   
-  function _buildShapeEditor(data) {
-    // Don't clear if we're just updating existing spheres
-    if (!_shapeEditorMode) {
-      _clearShapeEditor();
-    } else {
-      // Just remove existing spheres, keep other state
-      const root = ensureDisplayRoot();
-      const toRemove = [];
-      root.traverse(obj => {
-        if (obj.userData?.isShapeEditor) {
-          toRemove.push(obj);
-        }
-      });
-      toRemove.forEach(obj => {
-        if (obj.parent) obj.parent.remove(obj);
-      });
+  function loadShapeEditor(activeSpheres, frontierSpheres, radius, color, showNeighbors) {
+    console.log('[Shape] === LOAD SHAPE EDITOR START ===');
+    console.log('[Shape] Parameters received:');
+    console.log('[Shape]   - Active spheres:', activeSpheres?.length || 0);
+    console.log('[Shape]   - Frontier spheres:', frontierSpheres?.length || 0);
+    console.log('[Shape]   - Radius:', radius);
+    console.log('[Shape]   - Color:', color);
+    console.log('[Shape]   - Show neighbors:', showNeighbors);
+    
+    // Validate input data
+    if (!Array.isArray(activeSpheres)) {
+      console.error('[Shape] ERROR: activeSpheres is not an array:', typeof activeSpheres);
+      return;
     }
+    if (!Array.isArray(frontierSpheres)) {
+      console.error('[Shape] ERROR: frontierSpheres is not an array:', typeof frontierSpheres);
+      return;
+    }
+    
+    // Check for invalid sphere data
+    activeSpheres.forEach((sphere, idx) => {
+      if (!sphere || typeof sphere.x !== 'number' || typeof sphere.y !== 'number' || typeof sphere.z !== 'number') {
+        console.error('[Shape] ERROR: Invalid active sphere data at index', idx, ':', sphere);
+      }
+    });
+    
+    frontierSpheres.forEach((sphere, idx) => {
+      if (!sphere || typeof sphere.x !== 'number' || typeof sphere.y !== 'number' || typeof sphere.z !== 'number') {
+        console.error('[Shape] ERROR: Invalid frontier sphere data at index', idx, ':', sphere);
+      }
+    });
+    
+    _activeSpheres = activeSpheres || [];
+    _frontierSpheres = frontierSpheres || [];
+    _shapeRadius = radius || 0.5;
+    _editColor = color || 'blue';
+    _showNeighbors = showNeighbors !== false;
+    
+    console.log('[Shape] Stored data:');
+    console.log('[Shape]   - _activeSpheres length:', _activeSpheres.length);
+    console.log('[Shape]   - _frontierSpheres length:', _frontierSpheres.length);
+    console.log('[Shape]   - _shapeRadius:', _shapeRadius);
+    
+    _buildShapeEditor();
+  }
+
+  function _buildShapeEditor(data) {
+    console.log('[Shape] === BUILD SHAPE EDITOR START ===');
+    console.log('[Shape] _buildShapeEditor called with:', data);
+    console.log('[Shape] Current _shapeEditorMode:', _shapeEditorMode);
+    console.log('[Shape] Active spheres to create:', data?.active_spheres?.length || _activeSpheres?.length || 0);
+    console.log('[Shape] Frontier spheres to create:', data?.frontier_spheres?.length || _frontierSpheres?.length || 0);
+    console.log('[Shape] Current scene children count:', scene?.children?.length || 0);
+    
+    // Always do a full clear for interactive editing to avoid accumulation issues
+    console.log('[Shape] Doing full clear for interactive editing');
+    _clearShapeEditor();
     _initShapeMaterials();
     
     const root = ensureDisplayRoot();
-    _shapeRadius = data.radius || 0.5;
-    _editColor = data.edit_color || 'blue';
-    _activeSpheres = data.active_spheres || [];
-    _frontierSpheres = data.frontier_spheres || [];
-    _allFrontierSpheres = data.all_frontier_spheres || data.frontier_spheres || [];
     
-    // Create active spheres
+    // Use data parameter if provided, otherwise use stored values
+    if (data) {
+      _shapeRadius = data.radius || 0.5;
+      _editColor = data.edit_color || 'blue';
+      _activeSpheres = data.active_spheres || [];
+      _frontierSpheres = data.frontier_spheres || [];
+      _allFrontierSpheres = data.all_frontier_spheres || data.frontier_spheres || [];
+    }
+    
+    console.log('[Shape] Using sphere data:');
+    console.log('[Shape]   - Radius:', _shapeRadius);
+    console.log('[Shape]   - Active spheres:', _activeSpheres.length);
+    console.log('[Shape]   - Frontier spheres:', _frontierSpheres.length);
+    console.log('[Shape]   - Show neighbors:', _showNeighbors);
+    
+    // Create active spheres with critical threshold monitoring
+    console.log('[Shape] Creating', _activeSpheres.length, 'active spheres with radius:', _shapeRadius);
+    
+    
     _activeSpheres.forEach((center, idx) => {
-      const geometry = new THREE.SphereGeometry(_shapeRadius, 24, 16);
+      // Use consistent high-quality geometry like file loading
+      let segments = 24;
+      let rings = 16;
+      
+      const geometry = new THREE.SphereGeometry(_shapeRadius, segments, rings);
       const sphere = new THREE.Mesh(geometry, _shapeMaterials.active);
+      
+      // Validate position data
+      if (typeof center.x !== 'number' || typeof center.y !== 'number' || typeof center.z !== 'number') {
+        console.error('[Shape] Invalid position data for sphere', idx, ':', center);
+        return;
+      }
+      
       sphere.position.set(center.x, center.y, center.z);
       sphere.userData.isShapeEditor = true;
       sphere.userData.shapeType = 'active';
       sphere.userData.shapeIndex = idx;
+      
       root.add(sphere);
     });
     
+    const createdActiveCount = root.children.filter(c => c.userData?.shapeType === 'active').length;
+    console.log('[Shape] Active spheres created. Total in scene:', createdActiveCount);
+    
+    
     // Create visible frontier spheres
+    console.log('[Shape] Creating', _frontierSpheres.length, 'frontier spheres with radius:', _shapeRadius);
     _frontierSpheres.forEach((center, idx) => {
-      const geometry = new THREE.SphereGeometry(_shapeRadius, 24, 16);
+      // Validate position data
+      if (typeof center.x !== 'number' || typeof center.y !== 'number' || typeof center.z !== 'number') {
+        console.error('[Shape] Invalid frontier position data for sphere', idx, ':', center);
+        return;
+      }
+      
+      // Use consistent geometry like file loading
+      let segments = 16;
+      let rings = 12;
+      
+      const geometry = new THREE.SphereGeometry(_shapeRadius, segments, rings);
       const sphere = new THREE.Mesh(geometry, _shapeMaterials.frontier);
       sphere.position.set(center.x, center.y, center.z);
       sphere.userData.isShapeEditor = true;
@@ -770,8 +852,60 @@ window.viewer = window.viewer || {};
       });
     }
     
-    // Update camera pivot to active spheres bounding box center
-    _updateCameraPivot();
+    // Skip camera pivot updates at critical sphere counts to avoid rendering issues
+    if (_activeSpheres.length < 15) {
+      _updateCameraPivot();
+    } else {
+      console.log('[Shape] Skipping camera pivot update at', _activeSpheres.length, 'spheres to avoid rendering issues');
+    }
+    
+    // Final verification - count actual spheres in scene
+    const finalActiveCount = root.children.filter(c => c.userData?.shapeType === 'active').length;
+    const finalFrontierCount = root.children.filter(c => c.userData?.shapeType === 'frontier').length;
+    console.log('[Shape] FINAL VERIFICATION: Scene contains', finalActiveCount, 'active and', finalFrontierCount, 'frontier spheres');
+    
+    if (finalActiveCount !== _activeSpheres.length) {
+      console.error('[Shape] SPHERE COUNT MISMATCH! Expected', _activeSpheres.length, 'active spheres, but scene has', finalActiveCount);
+    }
+    
+    // Check if any spheres are outside camera view or have rendering issues
+    const camera = window.camera;
+    if (camera) {
+      let visibleCount = 0;
+      let renderableCount = 0;
+      root.children.forEach(child => {
+        if (child.userData?.shapeType === 'active') {
+          const distance = camera.position.distanceTo(child.position);
+          console.log('[Shape] Active sphere at', child.position, 'distance from camera:', distance, 'visible:', child.visible, 'material opacity:', child.material?.opacity);
+          
+          // Check if sphere is renderable
+          if (child.visible && child.material && child.material.opacity > 0 && child.geometry) {
+            renderableCount++;
+          }
+          
+          if (distance < 1000) visibleCount++; // Arbitrary large distance
+        }
+      });
+      console.log('[Shape] Spheres within camera range:', visibleCount, 'of', finalActiveCount);
+      console.log('[Shape] Renderable spheres:', renderableCount, 'of', finalActiveCount);
+      
+      if (renderableCount < finalActiveCount) {
+        console.error('[Shape] RENDERING ISSUE: Some spheres are not renderable!');
+      }
+    }
+    
+    // Check Three.js renderer and scene state
+    if (window.renderer) {
+      console.log('[Shape] Renderer info - geometries:', window.renderer.info.memory.geometries, 'textures:', window.renderer.info.memory.textures);
+      console.log('[Shape] Renderer calls:', window.renderer.info.render.calls, 'triangles:', window.renderer.info.render.triangles);
+    }
+    
+    // Force a render to see if that helps
+    if (window.renderer && window.scene && window.camera) {
+      console.log('[Shape] Forcing render after sphere creation');
+      window.renderer.render(window.scene, window.camera);
+      
+    }
   }
   
   function _updateCameraPivot() {
@@ -867,7 +1001,17 @@ window.viewer = window.viewer || {};
     const intersects = raycaster.intersectObjects(shapeObjects);
     
     if (intersects.length > 0) {
-      const target = intersects[0].object;
+      // Prioritize active spheres for deletion clicks
+      let target = intersects[0].object;
+      
+      // If we hit multiple objects, prefer active spheres for easier deletion
+      for (let i = 0; i < intersects.length; i++) {
+        if (intersects[i].object.userData.shapeType === 'active') {
+          target = intersects[i].object;
+          break;
+        }
+      }
+      
       const shapeType = target.userData.shapeType;
       const shapeIndex = target.userData.shapeIndex;
       
