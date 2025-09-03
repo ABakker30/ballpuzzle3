@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, Signal, Slot, QUrl, QTimer, Qt, Property
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QSizePolicy,
     QGroupBox, QGridLayout, QLabel, QPushButton, QMessageBox, QFormLayout,
-    QSlider, QComboBox, QFileDialog, QSpinBox
+    QSlider, QComboBox, QFileDialog, QSpinBox, QCheckBox
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
@@ -134,15 +134,20 @@ class ShapeTab(QWidget):
         btn_reset.clicked.connect(self._reset_to_origin)
         edit_layout.addWidget(btn_reset)
         
-        # Color picker for editing
-        color_layout = QFormLayout()
-        self.color_combo = QComboBox(edit_group)
-        self.color_combo.addItems([
-            "Red", "Blue", "Green", "Yellow", "Purple", "Orange", "Cyan", "Pink"
-        ])
-        self.color_combo.setCurrentText("Blue")
-        self.color_combo.currentTextChanged.connect(self._on_color_changed)
-        color_layout.addRow("Edit Color:", self.color_combo)
+        # Color picker
+        color_layout = QHBoxLayout()
+        color_layout.addWidget(QLabel("Color:"))
+        self.combo_color = QComboBox()
+        self.combo_color.addItems(["blue", "red", "green", "orange", "purple", "yellow"])
+        self.combo_color.currentTextChanged.connect(self._on_color_changed)
+        color_layout.addWidget(self.combo_color)
+        
+        # Show neighbors toggle
+        self.chk_show_neighbors = QCheckBox("Show Neighbors")
+        self.chk_show_neighbors.setChecked(True)
+        self.chk_show_neighbors.toggled.connect(self._on_neighbors_toggled)
+        color_layout.addWidget(self.chk_show_neighbors)
+        
         edit_layout.addLayout(color_layout)
         
         lbox.addWidget(edit_group)
@@ -444,12 +449,14 @@ class ShapeTab(QWidget):
         js_code = f"""
         console.log('[Shape] Updating viewer with', {len(active_spheres)}, 'active spheres');
         if (window.viewer && window.viewer.loadShapeEditor) {{
-            window.viewer.loadShapeEditor({{
-                active_spheres: {json.dumps(active_spheres)},
-                frontier_spheres: {json.dumps(frontier_spheres)},
-                radius: {self.RADIUS},
-                edit_color: "{color_name}"
-            }});
+           data = {{
+            'active_spheres': {json.dumps(active_spheres)},
+            'frontier_spheres': {json.dumps(frontier_spheres if self.chk_show_neighbors.isChecked() else [])},
+            'all_frontier_spheres': {json.dumps(frontier_spheres)},
+            'radius': {self.RADIUS},
+            'edit_color': "{color_name}"
+        }};
+        window.viewer.loadShapeEditor(data);
         }} else {{
             console.error('[Shape] loadShapeEditor function not available');
         }}
@@ -593,6 +600,10 @@ class ShapeTab(QWidget):
     
     def _on_color_changed(self, color_name: str):
         """Update viewer color when selection changes."""
+        self._update_viewer()
+    
+    def _on_neighbors_toggled(self, checked: bool):
+        """Toggle visibility of frontier spheres."""
         self._update_viewer()
 
 

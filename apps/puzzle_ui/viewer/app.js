@@ -635,6 +635,7 @@ window.viewer = window.viewer || {};
   let _shapeEditorMode = false;
   let _activeSpheres = [];
   let _frontierSpheres = [];
+  let _allFrontierSpheres = [];
   let _hoverSphere = null;
   let _editColor = 'blue';
   let _shapeRadius = 0.5;
@@ -664,9 +665,9 @@ window.viewer = window.viewer || {};
     });
     
     _shapeMaterials.frontier = new THREE.MeshLambertMaterial({
-      color: baseColor,
+      color: 0xffffff,
       transparent: true,
-      opacity: 0.3
+      opacity: 0.1
     });
     
     _shapeMaterials.hover = new THREE.MeshLambertMaterial({
@@ -710,6 +711,7 @@ window.viewer = window.viewer || {};
     _editColor = data.edit_color || 'blue';
     _activeSpheres = data.active_spheres || [];
     _frontierSpheres = data.frontier_spheres || [];
+    _allFrontierSpheres = data.all_frontier_spheres || data.frontier_spheres || [];
     
     // Create active spheres
     _activeSpheres.forEach((center, idx) => {
@@ -722,7 +724,7 @@ window.viewer = window.viewer || {};
       root.add(sphere);
     });
     
-    // Create frontier spheres
+    // Create visible frontier spheres
     _frontierSpheres.forEach((center, idx) => {
       const geometry = new THREE.SphereGeometry(_shapeRadius, 24, 16);
       const sphere = new THREE.Mesh(geometry, _shapeMaterials.frontier);
@@ -732,6 +734,26 @@ window.viewer = window.viewer || {};
       sphere.userData.shapeIndex = idx;
       root.add(sphere);
     });
+    
+    // Create invisible frontier spheres for interaction (when neighbors are hidden)
+    if (_frontierSpheres.length === 0 && _allFrontierSpheres.length > 0) {
+      _allFrontierSpheres.forEach((center, idx) => {
+        const geometry = new THREE.SphereGeometry(_shapeRadius, 24, 16);
+        const invisibleMaterial = new THREE.MeshLambertMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.0,
+          visible: false
+        });
+        const sphere = new THREE.Mesh(geometry, invisibleMaterial);
+        sphere.position.set(center.x, center.y, center.z);
+        sphere.userData.isShapeEditor = true;
+        sphere.userData.shapeType = 'frontier';
+        sphere.userData.shapeIndex = idx;
+        sphere.userData.isInvisible = true;
+        root.add(sphere);
+      });
+    }
     
     // Update camera pivot to active spheres bounding box center
     _updateCameraPivot();
@@ -865,8 +887,8 @@ window.viewer = window.viewer || {};
     
     // Force camera fit for shape editor - reset zoom lock and use smaller margin
     __zoomLocked = false;
-    _fitDone = false;
-    window.viewer.fitOnce({ margin: 1.02 });
+    if (window.viewer.resetFit) window.viewer.resetFit();
+    if (window.viewer.fitOnce) window.viewer.fitOnce({ margin: 1.02 });
     
     renderer.render(scene, camera);
     return true;
