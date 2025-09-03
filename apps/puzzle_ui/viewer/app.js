@@ -674,6 +674,12 @@ window.viewer = window.viewer || {};
       transparent: true,
       opacity: 0.6
     });
+    
+    _shapeMaterials.hoverDelete = new THREE.MeshLambertMaterial({
+      color: 0xff0000,
+      transparent: true,
+      opacity: 0.6
+    });
   }
   
   function _clearShapeEditor() {
@@ -718,7 +724,7 @@ window.viewer = window.viewer || {};
     
     // Create frontier spheres
     _frontierSpheres.forEach((center, idx) => {
-      const geometry = new THREE.SphereGeometry(_shapeRadius * 0.85, 16, 12);
+      const geometry = new THREE.SphereGeometry(_shapeRadius, 24, 16);
       const sphere = new THREE.Mesh(geometry, _shapeMaterials.frontier);
       sphere.position.set(center.x, center.y, center.z);
       sphere.userData.isShapeEditor = true;
@@ -727,7 +733,33 @@ window.viewer = window.viewer || {};
       root.add(sphere);
     });
     
-    console.log(`[Shape] Loaded ${_activeSpheres.length} active + ${_frontierSpheres.length} frontier spheres`);
+    // Update camera pivot to active spheres bounding box center
+    _updateCameraPivot();
+  }
+  
+  function _updateCameraPivot() {
+    if (_activeSpheres.length === 0) return;
+    
+    // Calculate bounding box of active spheres
+    const bbox = new THREE.Box3();
+    _activeSpheres.forEach(center => {
+      bbox.expandByPoint(new THREE.Vector3(center.x, center.y, center.z));
+    });
+    
+    const center = new THREE.Vector3();
+    bbox.getCenter(center);
+    
+    // Update controls target to center of active spheres
+    if (controls && controls.target) {
+      const oldTarget = controls.target.clone();
+      const delta = center.clone().sub(oldTarget);
+      
+      // Move camera by the same delta to maintain view
+      controls.target.copy(center);
+      camera.position.add(delta);
+      
+      controls.update();
+    }
   }
   
   function _onMouseMove(event) {
@@ -758,10 +790,12 @@ window.viewer = window.viewer || {};
     
     if (intersects.length > 0) {
       const target = intersects[0].object;
+      const shapeType = target.userData.shapeType;
       
-      // Show hover preview
+      // Show hover preview with appropriate color
       const geometry = new THREE.SphereGeometry(_shapeRadius * 1.1, 16, 12);
-      _hoverSphere = new THREE.Mesh(geometry, _shapeMaterials.hover);
+      const material = (shapeType === 'active') ? _shapeMaterials.hoverDelete : _shapeMaterials.hover;
+      _hoverSphere = new THREE.Mesh(geometry, material);
       _hoverSphere.position.copy(target.position);
       scene.add(_hoverSphere);
       
