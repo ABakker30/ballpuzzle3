@@ -703,7 +703,22 @@ window.viewer = window.viewer || {};
   }
   
   function _buildShapeEditor(data) {
-    _clearShapeEditor();
+    // Don't clear if we're just updating existing spheres
+    if (!_shapeEditorMode) {
+      _clearShapeEditor();
+    } else {
+      // Just remove existing spheres, keep other state
+      const root = ensureDisplayRoot();
+      const toRemove = [];
+      root.traverse(obj => {
+        if (obj.userData?.isShapeEditor) {
+          toRemove.push(obj);
+        }
+      });
+      toRemove.forEach(obj => {
+        if (obj.parent) obj.parent.remove(obj);
+      });
+    }
     _initShapeMaterials();
     
     const root = ensureDisplayRoot();
@@ -782,6 +797,11 @@ window.viewer = window.viewer || {};
       
       controls.update();
     }
+    
+    // Force camera fit for shape editor - reset zoom lock and use smaller margin
+    __zoomLocked = false;
+    if (window.viewer && window.viewer.resetFit) window.viewer.resetFit();
+    if (window.viewer && window.viewer.fitOnce) window.viewer.fitOnce({ margin: 1.02 });
   }
   
   function _onMouseMove(event) {
@@ -884,11 +904,6 @@ window.viewer = window.viewer || {};
     // Add event listeners
     renderer.domElement.addEventListener('mousemove', _onMouseMove);
     renderer.domElement.addEventListener('click', _onMouseClick);
-    
-    // Force camera fit for shape editor - reset zoom lock and use smaller margin
-    __zoomLocked = false;
-    if (window.viewer.resetFit) window.viewer.resetFit();
-    if (window.viewer.fitOnce) window.viewer.fitOnce({ margin: 1.02 });
     
     renderer.render(scene, camera);
     return true;

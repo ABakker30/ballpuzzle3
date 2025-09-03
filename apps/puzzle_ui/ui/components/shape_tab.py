@@ -389,12 +389,16 @@ class ShapeTab(QWidget):
             return False
         
         self.active_spheres.remove(idx)
-        self._rebuild_frontier()
-        self._recompute_shift()
-        return True
-    
     def _reset_to_origin(self):
-        """Reset to single origin sphere."""
+        # Auto-save timer and backup
+        self.auto_save_timer = QTimer()
+        self.auto_save_timer.timeout.connect(self._auto_save)
+        self.auto_save_timer.setSingleShot(True)
+        self.last_backup_file = None
+        
+        # Start auto-save timer on first edit
+        self.editing_started = False
+        
         self.active_spheres.clear()
         self.frontier_spheres.clear()
         
