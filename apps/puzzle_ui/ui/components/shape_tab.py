@@ -74,6 +74,12 @@ class ShapeTab(QWidget):
         self.shift = (0, 0, 0)  # Dynamic shift to keep coordinates positive
         self.parity_target = 0  # Even parity constraint
         
+        # Emergency backup system
+        self.sphere_backup = set()
+        self.backup_timer = QTimer()
+        self.backup_timer.timeout.connect(self._backup_spheres)
+        self.backup_timer.start(2000)  # Backup every 2 seconds
+        
         # Current file info
         self._current_file: Optional[Path] = None
         self._shape_name = "untitled"
@@ -147,6 +153,12 @@ class ShapeTab(QWidget):
         self.chk_show_neighbors.setChecked(True)
         self.chk_show_neighbors.toggled.connect(self._on_neighbors_toggled)
         color_layout.addWidget(self.chk_show_neighbors)
+        
+        # Emergency restore button
+        btn_restore = QPushButton("Restore Backup", edit_group)
+        btn_restore.clicked.connect(self._restore_backup)
+        btn_restore.setStyleSheet("QPushButton { background-color: #ff6b6b; color: white; font-weight: bold; }")
+        edit_layout.addWidget(btn_restore)
         
         edit_layout.addLayout(color_layout)
         
@@ -610,6 +622,25 @@ class ShapeTab(QWidget):
     def _on_neighbors_toggled(self, checked: bool):
         """Toggle visibility of frontier spheres."""
         self._update_viewer()
+    
+    def _backup_spheres(self):
+        """Backup current sphere state."""
+        if len(self.active_spheres) > 1:  # Only backup if we have more than just origin
+            self.sphere_backup = self.active_spheres.copy()
+            print(f"[Shape] Backed up {len(self.sphere_backup)} spheres")
+    
+    def _restore_backup(self):
+        """Restore spheres from backup."""
+        if self.sphere_backup:
+            self.active_spheres = self.sphere_backup.copy()
+            self._rebuild_frontier()
+            self._recompute_shift()
+            self._update_ui()
+            self._update_viewer()
+            print(f"[Shape] Restored {len(self.active_spheres)} spheres from backup")
+            QMessageBox.information(self, "Backup Restored", f"Restored {len(self.active_spheres)} spheres from backup")
+        else:
+            QMessageBox.warning(self, "No Backup", "No backup available to restore")
 
 
 class ShapeEditorBridge(QObject):
