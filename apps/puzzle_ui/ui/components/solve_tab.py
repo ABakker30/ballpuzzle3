@@ -400,11 +400,11 @@ class SolveTab(QWidget):
         except Exception:
             pass
 
-        # If this is the first load, fit once
-        if not self._camfit_done_for_path:
-            self._viewer_eval_js("typeof viewer!=='undefined' && viewer.fitOnce && viewer.fitOnce({margin:1.15})")
-            self._camfit_done_for_path = True
-            print(f"[Camera] Initial fit applied for: {path}")
+        # Do NOT fit camera on file loads - preserve user camera position completely
+        # if not self._camfit_done_for_path:
+        #     self._viewer_eval_js("typeof viewer!=='undefined' && viewer.fitOnce && viewer.fitOnce({margin:1.15})")
+        #     self._camfit_done_for_path = True
+        #     print(f"[Camera] Initial fit applied for: {path}")
 
     def _clear_stats_world_only(self):
         self._update_run_label({})
@@ -702,7 +702,7 @@ class SolveTab(QWidget):
             "typeof viewer!=='undefined' && viewer.getPieceCount ? "
             "viewer.getPieceCount() : 0"
         )
-        self._viewer_eval_js("typeof viewer!=='undefined' && viewer.resetRevealOrder && viewer.resetRevealOrder();"+SAFE_GETCOUNT, self._on_piece_count)
+        self._viewer_eval_js(SAFE_GETCOUNT, self._on_piece_count)
 
     def _on_piece_count(self, total):
         try:

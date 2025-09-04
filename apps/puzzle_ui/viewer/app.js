@@ -14,6 +14,9 @@ let lastBBoxKey = null;
 let __zoomLocked = false;
 let __savedOrthoZoom = null;
 let __savedPerspDist = null;
+let __pivotCenter = null;  // Computed once per container
+let __containerHash = null;  // Track container changes
+let __cameraInitialized = false;  // Track if camera has been set for current container
 
 function __saveZoom() {
   if (typeof camera === "undefined" || !camera) return;
@@ -360,6 +363,35 @@ function computeBbox(pieces, r) {
   return { min: [minX - pad, minY - pad, minZ - pad], max: [maxX + pad, maxY + pad, maxZ + pad] };
 }
 
+function computePivotCenter(pieces) {
+  // Compute center of bounding box of all sphere centers (no padding)
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  let any = false;
+  
+  for (const p of pieces) {
+    for (const c of p.centers) {
+      if (!Array.isArray(c) || c.length < 3) continue;
+      const [x, y, z] = c;
+      if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+      any = true;
+      if (x < minX) minX = x; if (y < minY) minY = y; if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x; if (y > maxY) maxY = y; if (z > maxZ) maxZ = z;
+    }
+  }
+  
+  if (!any) {
+    return new THREE.Vector3(0, 0, 0);  // fallback to origin
+  }
+  
+  // Return center of bounding box
+  return new THREE.Vector3(
+    (minX + maxX) * 0.5,
+    (minY + maxY) * 0.5,
+    (minZ + maxZ) * 0.5
+  );
+}
+
 function fitOrthoToBbox(bbox) {
   if (__zoomLocked) return;  // never refit after the first time
 
@@ -497,6 +529,11 @@ function drawPayload(payload) {
     console.log('[viewer] CLEAR action - clearing viewer');
     clearSceneMeshes();
     resetDisplayRoot();
+    // Reset container tracking for new container
+    __containerHash = null;
+    __pivotCenter = null;
+    __zoomLocked = false;
+    __cameraInitialized = false;  // Allow camera setup for new container
     renderer.render(scene, camera);
     return;
   }
@@ -508,18 +545,44 @@ function drawPayload(payload) {
   const r = (typeof payload?.r === 'number') ? payload.r : 0.5;
   const pieces = normalizePieces(payload?.pieces);
 
-  // Choose/compute bbox
-  let bbox = payload?.bbox;
-  if (!bbox || !Array.isArray(bbox.min) || !Array.isArray(bbox.max)) {
-    bbox = computeBbox(pieces, r);
+  // Check if this is a new container by creating a hash of container structure
+  const containerHash = JSON.stringify({
+    container_name: payload?.container_name,
+    container_cells: payload?.container_cells?.length || 0,
+    piece_count: pieces.length
+  });
+
+  // Compute pivot center and initialize camera only once per container
+  if (__containerHash !== containerHash) {
+    console.log('[Camera] New container detected - computing pivot center and initializing camera');
+    __containerHash = containerHash;
+    __pivotCenter = computePivotCenter(pieces);
+    __cameraInitialized = false;  // Allow camera initialization for new container
+    console.log('[Camera] Pivot center set to:', __pivotCenter);
   }
 
-  // Camera fitting: only on first load, preserve user settings thereafter
-  if (!__zoomLocked) {
+  // Initialize camera view ONLY once per container
+  if (!__cameraInitialized) {
+    // Choose/compute bbox
+    let bbox = payload?.bbox;
+    if (!bbox || !Array.isArray(bbox.min) || !Array.isArray(bbox.max)) {
+      bbox = computeBbox(pieces, r);
+    }
+
+    // Set up camera position, rotation, and scale once
     fitOrthoToBbox(bbox);
-    console.log('[Camera] First load - fitting to bounding box');
+    
+    // Set controls target to pivot center ONLY on initialization
+    if (__pivotCenter && controls) {
+      controls.target.copy(__pivotCenter);
+      console.log('[Camera] Controls target set to pivot center:', __pivotCenter);
+    }
+    
+    __cameraInitialized = true;
+    console.log('[Camera] Camera initialized for container - position/rotation/scale locked');
   } else {
-    console.log('[Camera] Subsequent load - preserving user camera settings');
+    console.log('[Camera] Preserving user camera settings - no camera or controls changes');
+    // Do NOT update controls.target or any camera properties during updates
   }
 
   // a bit smoother for nicer specular highlights (tune if perf dips)
@@ -1015,6 +1078,11 @@ let _shapeEditorMode = false;
   }
   
   function _updateCameraPivot() {
+    // Do NOT update camera or pivot during updates - preserve user settings completely
+    return;
+    
+    // DISABLED: All camera/pivot adjustments removed to prevent centering during updates
+    /*
     if (_activeSpheres.length === 0) return;
     
     // Calculate bounding box of active spheres
@@ -1038,10 +1106,11 @@ let _shapeEditorMode = false;
       controls.update();
     }
     
-    // Force camera fit for shape editor - reset zoom lock and use smaller margin
-    __zoomLocked = false;
-    if (window.viewer && window.viewer.resetFit) window.viewer.resetFit();
-    if (window.viewer && window.viewer.fitOnce) window.viewer.fitOnce({ margin: 1.02 });
+    // Do NOT force camera fit during shape editor updates - preserve user camera position
+    // __zoomLocked = false;
+    // if (window.viewer && window.viewer.resetFit) window.viewer.resetFit();
+    // if (window.viewer && window.viewer.fitOnce) window.viewer.fitOnce({ margin: 1.02 });
+    */
   }
   
   let _lastMouseMoveTime = 0;
