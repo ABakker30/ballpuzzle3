@@ -51,9 +51,9 @@ if (typeof controls !== "undefined" && controls) {
   });
 }
 
-// ===== Distinct color strategies (25 pieces) =====
+// ===== Distinct color strategies (dynamic piece count) =====
 let __colorStrategy = "golden-3band";  // default
-const __PIECE_COUNT_DEFAULT = 25;
+let __PIECE_COUNT_DEFAULT = 25;  // fallback, will be updated dynamically
 
 // Small helpers
 function __hash32(str) {
@@ -304,11 +304,24 @@ function letterId(str) {
   const s = String(str).toUpperCase();
   let n = 0;
   for (let i = 0; i < s.length; i++) n = n * 26 + (s.charCodeAt(i) - 64);
-  return (n - 1) % 25; // Changed to 25
+  return (n - 1) % Math.max(__PIECE_COUNT_DEFAULT, 25); // Use dynamic piece count
+}
+
+// Update piece count based on container size
+function updatePieceCount(containerCells) {
+  if (containerCells && containerCells.length > 0) {
+    __PIECE_COUNT_DEFAULT = Math.max(containerCells.length / 4, 1);
+  }
 }
 
 function normalizePieces(raw) {
   const arr = Array.isArray(raw) ? raw : [];
+  
+  // Update piece count if we have container info
+  if (raw && raw.container_cells) {
+    updatePieceCount(raw.container_cells);
+  }
+  
   return arr.map((p, idx) => {
     const centers =
       Array.isArray(p.centers) ? p.centers :
@@ -477,6 +490,15 @@ function addBondsForAtoms(container, atoms, material) {
 
 // ---------- main payload entry ----------
 function drawPayload(payload) {
+  // Handle clear action
+  if (payload?.action === "clear") {
+    console.log('[viewer] Clearing viewer');
+    clearSceneMeshes();
+    resetDisplayRoot();
+    renderer.render(scene, camera);
+    return;
+  }
+
   // Normalize schema differences
   const r = (typeof payload?.r === 'number') ? payload.r : 0.5;
   const pieces = normalizePieces(payload?.pieces);

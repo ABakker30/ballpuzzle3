@@ -56,10 +56,16 @@ class MainWindow(QMainWindow):
         self.process_running = False
         self.solver_paused = False
         self._runctl_path: Optional[str] = None  # logs/runctl.json for the active run
+        self._current_container_path: Optional[str] = None  # Track current container for companion file detection
 
         self._world_watch_timer = QTimer(self)
         self._world_watch_timer.setInterval(1000)  # 1s poll, cheap
         self._world_watch_timer.timeout.connect(self._poll_world_json)
+        
+        # Companion file detection timer
+        self._companion_watch_timer = QTimer(self)
+        self._companion_watch_timer.setInterval(2000)  # Check every 2 seconds during solver runs
+        self._companion_watch_timer.timeout.connect(self._check_for_companion_file)
         self._last_world_mtime = 0.0
         self._world_path_cache = ""  # absolute path to *.current.world.json
 
@@ -132,6 +138,7 @@ class MainWindow(QMainWindow):
             self._set_status("Stopped")
             self._update_buttons()
             self._world_watch_timer.stop()
+            self._companion_watch_timer.stop()
 
     # ---------- UI build ----------
     def _build_ui(self):
@@ -171,6 +178,15 @@ class MainWindow(QMainWindow):
         print("[UI DEBUG] Solver button clicked")
         
         if not self.process_running:
+            # Clear viewer and reset all file references before loading new companion file
+            if self and hasattr(self, 'solve_tab'):
+                self.solve_tab.clear_viewer()
+            
+            # Clear main window's world file cache
+            if self:
+                self._world_path_cache = ""
+                self._last_world_mtime = 0.0
+            
             # Not running - start the solver
             print("[UI DEBUG] Starting solver...")
             self.solve_tab.reset_progress_ui()
@@ -208,6 +224,9 @@ class MainWindow(QMainWindow):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Missing container", "Please select a Container JSON.")
             return
+
+        # Track current container for companion file detection
+        self._current_container_path = container
 
         from pathlib import Path as _P
         prog_abs = _P(program)
@@ -268,6 +287,7 @@ class MainWindow(QMainWindow):
         self._set_status("Running")
         self._update_buttons()
         self._world_watch_timer.start()
+        self._companion_watch_timer.start()  # Start watching for companion file creation
         print("[UI DEBUG] UI state updated, solver should be running")
 
 
@@ -322,10 +342,11 @@ class MainWindow(QMainWindow):
         print(f"[UI DEBUG] _proc_finished called: code={code}, status={status}")
         self.process_running = False
         self.solver_paused = False
-        self.btnSolver.setText("▶ Start")
+        self.solve_tab.btnSolver.setText("▶ Start")
         self._set_status(f"Exited ({code})")
         self._update_buttons()
         self._world_watch_timer.stop()
+        self._companion_watch_timer.stop()
 
     def _drain_output(self, which: str):
         if not self.proc:
@@ -366,6 +387,31 @@ class MainWindow(QMainWindow):
         else:
             self.solve_tab.btnSolver.setText("⏸ Pause")
 
+    def _check_for_companion_file(self):
+        """Check if companion file has been created during solver run and auto-load it."""
+        if not self._current_container_path or not self.process_running:
+            return
+            
+        try:
+            from pathlib import Path
+            container_file = Path(self._current_container_path)
+            container_stem = container_file.stem
+            companion_name = f"{container_stem}.current.world.json"
+            
+            # Check if companion file exists in solver results directory
+            results_path = repo_root() / "external" / "solver" / "results" / companion_name
+            
+            if results_path.exists():
+                # Check if this file is already loaded in the viewer
+                current_world_file = getattr(self.solve_tab, '_current_world_file', None)
+                if current_world_file != results_path:
+                    print(f"[UI DEBUG] New companion file detected during solver run: {companion_name}")
+                    self.solve_tab.open_world_file(results_path)
+                    print(f"[UI DEBUG] Auto-loaded companion file: {results_path}")
+                    
+        except Exception as e:
+            print(f"[UI DEBUG] Error checking for companion file: {e}")
+
     def _poll_world_json(self):
         p = self._current_world_path()
         if not p or not os.path.isfile(p):
@@ -375,25 +421,30 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         if p != self._world_path_cache:
-            # new file context
+            # new file context - reset cache when file changes
             self._world_path_cache = p
             self._last_world_mtime = 0.0
         if mt > self._last_world_mtime:
             self._last_world_mtime = mt
-            # Use the same path your Refresh viewer button/slot uses
-            try:
-                # reuse your existing refresh path to avoid refits
-                if hasattr(self.solve_tab, "refresh_all"):
-                    self.solve_tab.refresh_all()
-                else:
-                    # fallback to the top-bar button if wired there
-                    self.btnRefreshTop.click()
-            except Exception:
-                pass
+            # Only refresh if we have a valid current world file loaded
+            # This prevents refreshing old files after container selection
+            current_world_file = getattr(self.solve_tab, '_current_world_file', None)
+            if current_world_file and str(current_world_file) == p:
+                try:
+                    # reuse your existing refresh path to avoid refits
+                    if hasattr(self.solve_tab, "refresh_all"):
+                        self.solve_tab.refresh_all()
+                    else:
+                        # fallback to the top-bar button if wired there
+                        self.btnRefreshTop.click()
+                except Exception:
+                    pass
 
     def _current_world_path(self):
-        # implement logic to get the current world path
-        pass
+        # Return the path of the currently loaded world file in the solve tab
+        if hasattr(self.solve_tab, '_current_world_file') and self.solve_tab._current_world_file:
+            return str(self.solve_tab._current_world_file)
+        return None
 
 
 def main():

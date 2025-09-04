@@ -327,6 +327,15 @@ class OptionsPanel(QWidget):
                             print("[UI DEBUG] New container selected - stopping current solver")
                             main_window._stop_solver()
                         
+                        # Clear viewer and reset all file references before loading new companion file
+                        if main_window and hasattr(main_window, 'solve_tab'):
+                            main_window.solve_tab.clear_viewer()
+                            
+                        # Clear main window's world file cache
+                        if main_window:
+                            main_window._world_path_cache = ""
+                            main_window._last_world_mtime = 0.0
+                        
                         self._auto_load_companion_viewer_file(p)
 
             btn.clicked.connect(browse)

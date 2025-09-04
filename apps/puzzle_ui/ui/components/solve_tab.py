@@ -340,6 +340,31 @@ class SolveTab(QWidget):
         self.bridge.sendPayload.emit(payload)
 
     # ---------- world file handling ----------
+    def clear_viewer(self):
+        """Clear the viewer of all geometry and all file references."""
+        print("[UI DEBUG] Clearing viewer and all file references")
+        payload = {
+            "action": "clear",
+            "timestamp": time.time()
+        }
+        self.bridge.sendPayload.emit(payload)
+        
+        # Clear current world file reference
+        self._current_world_file = None
+        self.lblFile.setText("—")
+        self.lblContainer.setText("—")
+        self.lblPlaced.setText("— / —")
+        
+        # Clear world watch path and stop watching old files
+        self._world_path = None
+        try:
+            for p in list(self._world_watch.files()):
+                self._world_watch.removePath(p)
+            for d in list(self._world_watch.directories()):
+                self._world_watch.removePath(d)
+        except Exception:
+            pass
+
     def open_world_file(self, path: Path):
         """Parse a *.current.world.json (or sample) and update labels + viewer."""
         self._current_world_file = path
@@ -433,16 +458,19 @@ class SolveTab(QWidget):
         self.refresh_reveal_total()
 
     def refresh_all(self):
-        self.refresh_viewer()
-        self._poll_tick(force=True)
-        try:
-            SAFE_GETCOUNT = (
-                "typeof viewer!=='undefined' && viewer.getPieceCount ? "
-                "viewer.getPieceCount() : 0"
-            )
-            self._viewer_eval_js(SAFE_GETCOUNT, self._on_piece_count)
-        except Exception:
-            pass
+        # Only refresh if we have a valid current world file loaded
+        # This prevents refreshing after clear_viewer() has been called
+        if self._current_world_file is not None:
+            self.refresh_viewer()
+            self._poll_tick(force=True)
+            try:
+                SAFE_GETCOUNT = (
+                    "typeof viewer!=='undefined' && viewer.getPieceCount ? "
+                    "viewer.getPieceCount() : 0"
+                )
+                self._viewer_eval_js(SAFE_GETCOUNT, self._on_piece_count)
+            except Exception:
+                pass
 
     # ---------- progress polling (snapshot + jsonl tail) ----------
     def _poll_tick(self, force: bool = False):
