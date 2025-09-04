@@ -58,7 +58,9 @@ class SolveTab(QWidget):
         self._jsonl_buf: str = ""
 
         # ---- Totals (all runs) ----
-        self._agg_by_run = defaultdict(lambda: {"best": -1, "attempts": 0})
+        self._total_attempts_cumulative = 0  # True cumulative count that only increases
+        self._run_last_attempts = {}  # Track last seen attempts per run to detect increases
+        self._run_best = {}      # Simple dict: run_id -> best_depth
 
         self._world_path: Path | None = None
         self._world_mtime: float = 0.0
@@ -108,6 +110,10 @@ class SolveTab(QWidget):
         lbox.setContentsMargins(10, 10, 10, 10)
         lbox.setSpacing(8)
 
+        # Solver control button
+        self.btnSolver = QPushButton("▶ Start", left)
+        lbox.addWidget(self.btnSolver)
+
         # Options panel (schema-driven)
         self.opts = OptionsPanel(left)
         lbox.addWidget(self.opts, 1)
@@ -122,8 +128,7 @@ class SolveTab(QWidget):
         stats = QGroupBox("Progress (auto-follow)", left)
         sgrid = QFormLayout(stats)
         self.lblFile = QLabel("—", stats)
-        run_label = QLabel("Run:", stats)
-        self.lblRun = QLabel("—", stats)            # ← store on self and set default here
+        self.lblRun = QLabel("—", stats)
         self.lblContainer = QLabel("—", stats)
         self.lblPlaced = QLabel("— / —", stats)
         self.lblBest = QLabel("—", stats)
@@ -133,26 +138,14 @@ class SolveTab(QWidget):
             (QLabel("World file:"), self.lblFile),
             (QLabel("Run:"), self.lblRun),
             (QLabel("Container:"), self.lblContainer),
-            (QLabel("Placed / Total:"), self.lblPlaced, QLabel("—", stats)),
+            (QLabel("Placed / Total:"), self.lblPlaced),
             (QLabel("Best depth:"), self.lblBest),
             (QLabel("Attempts:"), self.lblAttempts),
             (QLabel("Attempts/sec:"), self.lblRate),
         ]
         for row in rows:
-            if len(row) == 2:
-                lab, w = row
-                sgrid.addRow(lab, w)
-            elif len(row) == 3:
-                lab, w1, w2 = row
-                holder = QWidget(stats)
-                hb = QHBoxLayout(holder)
-                hb.setContentsMargins(0, 0, 0, 0)
-                hb.setSpacing(6)
-                hb.addWidget(w1)
-                hb.addWidget(w2)
-                sgrid.addRow(lab, holder)
-            else:
-                continue  # skip bad rows
+            lab, w = row
+            sgrid.addRow(lab, w)
         lbox.addWidget(stats, 0)
 
         # Totals (all runs)
@@ -162,6 +155,7 @@ class SolveTab(QWidget):
         self.lblBestAll     = QLabel("0")
         self.lblAttemptsAll = QLabel("0")
         self.btnResetTotals = QPushButton("Reset totals")
+        self.btnResetTotals.clicked.connect(self._reset_run_aggregates)
 
         totals_form.addRow("Best depth:", self.lblBestAll)
         totals_form.addRow("Attempts:",   self.lblAttemptsAll)
@@ -339,6 +333,7 @@ class SolveTab(QWidget):
             "bbox": data.get("bbox"),
             "pieces": data.get("pieces", []),  # [{id, name, centers:[[x,y,z],...]}]
             "container_name": data.get("container_name"),
+            "container_cells": data.get("container_cells", []),  # Add container cells for piece count calculation
             "lattice": data.get("lattice"),
             "space": data.get("space"),
         }
@@ -357,7 +352,15 @@ class SolveTab(QWidget):
 
         self._update_run_label(data)
         self.lblContainer.setText(str(data.get("container_name", "—")))
-        total = 25
+        
+        # Calculate total pieces based on container size (spheres ÷ 4)
+        container_spheres = len(data.get("container_cells", []))
+        if container_spheres == 0:
+            # Fallback: count from pieces array length
+            total = len(data.get("pieces", []))
+        else:
+            total = container_spheres // 4  # Each piece has 4 spheres
+        
         placed = sum(len(p.get("centers", [])) > 0 for p in data.get("pieces", []))
         self.lblPlaced.setText(f"{placed} / {total}")
 
@@ -478,6 +481,7 @@ class SolveTab(QWidget):
             data = json.loads(txt)
         except Exception:
             return
+        # Use snapshot as primary source (jsonl is corrupted)
         self._apply_progress_obj(data)
 
     def _consume_jsonl_bytes(self, b: bytes):
@@ -503,16 +507,26 @@ class SolveTab(QWidget):
                 break
             except Exception:
                 continue
-        if last_obj:
-            self._apply_progress_obj(last_obj)
+        # Disable jsonl processing - using only progress.json now
+        pass
 
     def _apply_progress_obj(self, data: Dict[str, Any]):
         self._update_run_label(data)
 
         placed = data.get("placed")
-        total = data.get("total", 25)
-        if placed is not None:
+        
+        # Calculate total pieces from container size if available
+        container_spheres = data.get("container_spheres")
+        if container_spheres:
+            total = container_spheres // 4
+        else:
+            # Always use total from progress data - solver now calculates correctly
+            total = data.get("total")
+        
+        if placed is not None and total is not None:
             self.lblPlaced.setText(f"{placed} / {total}")
+        elif placed is not None:
+            self.lblPlaced.setText(f"{placed} / —")
 
         best = data.get("best_depth")
         if best is not None:
@@ -525,52 +539,47 @@ class SolveTab(QWidget):
         rate = data.get("attempts_per_sec")
         if rate is not None:
             try:
-                self.lblRate.setText(f"{float(rate):.1f}")
+                self.lblRate.setText(str(int(float(rate))))
             except Exception:
                 self.lblRate.setText(str(rate))
 
-        self._ingest_progress_obj(data)  # Update cross-run totals
+        # Update totals from progress.json (now includes cross-run totals)
+        self._ingest_progress_obj(data)
+        
+        # Update container name from progress data
+        container_name = data.get("container_name")
+        if container_name:
+            self.lblContainer.setText(container_name)
 
     def _reset_run_aggregates(self):
-        """Manual clear for cross-run totals."""
-        self._agg_by_run.clear()
-        self.lblBestAll.setText("0")
-        self.lblAttemptsAll.setText("0")
+        """Manual clear for cross-run totals by resetting solver's state file."""
+        try:
+            # Reset the solver's cross-run state file
+            import os
+            state_file = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "external", "solver", "logs", "cross_run_state.json")
+            if os.path.exists(state_file):
+                os.remove(state_file)
+            
+            # Reset UI display
+            self.lblBestAll.setText("0")
+            self.lblAttemptsAll.setText("0")
+        except Exception:
+            # Fallback to just resetting display
+            self.lblBestAll.setText("0")
+            self.lblAttemptsAll.setText("0")
 
     def _ingest_progress_obj(self, obj: dict):
         """
-        Update cross-run totals from one JSON 'progress' payload:
-          {"event":"progress","run":int,"best_depth":int,"attempts":int,...}
-        Safe to call even if some keys are missing.
+        Update totals display from progress.json (now includes cross-run totals from solver).
         """
         try:
-            if not isinstance(obj, dict) or obj.get("event") != "progress":
-                return
-            run = obj.get("run")
-            if run is None:
-                return
-
-            # last-seen values for that run
-            best = obj.get("best_depth")
-            attempts = obj.get("attempts")
-            if best is not None:
-                try: best = int(best)
-                except Exception: best = None
-            try: attempts = int(attempts) if attempts is not None else None
-            except Exception: attempts = None
-
-            rec = self._agg_by_run[run]
-            if best is not None and best > rec["best"]:
-                rec["best"] = best
-            if attempts is not None and attempts > rec["attempts"]:
-                rec["attempts"] = attempts
-
-            # recompute totals
-            if self._agg_by_run:
-                best_all = max((v["best"] for v in self._agg_by_run.values()), default=-1)
-                attempts_all = sum(v["attempts"] for v in self._agg_by_run.values())
-                self.lblBestAll.setText(str(max(0, best_all)))
-                self.lblAttemptsAll.setText(str(attempts_all))
+            # Get cross-run totals directly from progress.json
+            total_attempts = obj.get("total_attempts_all_runs", 0)
+            best_all = obj.get("best_depth_all_runs", 0)
+            
+            # Update totals display with proper formatting
+            self.lblAttemptsAll.setText(f"{total_attempts:,}")
+            self.lblBestAll.setText(str(best_all))
         except Exception:
             # Never let totals break the UI
             pass
@@ -802,6 +811,7 @@ class SolveTab(QWidget):
         run = payload.get("run") or payload.get("run_id")
         if isinstance(run, (int, float)) or (isinstance(run, str) and run.isdigit()):
             self._last_run_id = int(run)
+            print(f"[DEBUG] UI updating run label to: {self._last_run_id}")
         if getattr(self, "_last_run_id", None) is not None and hasattr(self, "lblRun"):
             self.lblRun.setText(str(self._last_run_id))
 

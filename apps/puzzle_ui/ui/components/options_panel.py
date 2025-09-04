@@ -115,8 +115,11 @@ class OptionsPanel(QWidget):
                 continue
 
             val = v.get(key, None)
-            # Skip empty strings for text/file/dir fields
+            # Skip empty strings for text/file/dir fields, but allow 0 for int fields
             if f.get("type") in ("string", "file", "dir") and (val is None or val == ""):
+                continue
+            # Skip None values for int fields, but allow 0
+            if f.get("type") == "int" and val is None:
                 continue
 
             if "position" in (arg or {}):
@@ -131,6 +134,9 @@ class OptionsPanel(QWidget):
                     if bool(val):
                         flagged.append(flag)
                 else:
+                    # Debug logging for snapshot_interval
+                    if key == "snapshot_interval":
+                        print(f"[DEBUG] Processing snapshot_interval: key={key}, val={val}, flag={flag}")
                     flagged.extend([flag, as_str(val)])
             elif "pattern" in (arg or {}):
                 pattern = arg["pattern"]
@@ -311,6 +317,17 @@ class OptionsPanel(QWidget):
                 if p:
                     line.setText(p)
                     self._field_changed()
+                    
+                    # Auto-load companion viewer file when container is selected
+                    field_key = f.get("key")
+                    if field_key == "container" and p:
+                        # Kill any running solver when new container is selected
+                        main_window = self._get_main_window()
+                        if main_window and hasattr(main_window, 'process_running') and main_window.process_running:
+                            print("[UI DEBUG] New container selected - stopping current solver")
+                            main_window._stop_solver()
+                        
+                        self._auto_load_companion_viewer_file(p)
 
             btn.clicked.connect(browse)
             line.textChanged.connect(self._field_changed)
@@ -416,3 +433,55 @@ class OptionsPanel(QWidget):
     def values_changed(self):
         _prog, _argv, pretty = self.build_command()
         self.txtCmd.setPlainText(pretty)
+
+    def _auto_load_companion_viewer_file(self, container_path: str):
+        """Auto-select companion viewer file when container is selected."""
+        try:
+            from pathlib import Path
+            container_file = Path(container_path)
+            
+            # Generate the companion viewer filename
+            # e.g., "32spheres.json" -> "32spheres.current.world.json"
+            container_stem = container_file.stem  # "32spheres"
+            companion_name = f"{container_stem}.current.world.json"
+            
+            # Look for the companion file in multiple locations
+            search_paths = [
+                repo_root() / "samples" / companion_name,
+                repo_root() / "samples" / "results" / companion_name,
+                repo_root() / "external" / "solver" / "results" / companion_name
+            ]
+            
+            print(f"[UI DEBUG] Auto-loading companion viewer file for container: {container_file.name}")
+            print(f"[UI DEBUG] Looking for companion file: {companion_name}")
+            
+            companion_path = None
+            for path in search_paths:
+                print(f"[UI DEBUG] Checking: {path}")
+                if path.exists():
+                    companion_path = path
+                    print(f"[UI DEBUG] Found companion file: {companion_path}")
+                    break
+            
+            if companion_path:
+                # Get the main window and load the viewer file
+                main_window = self._get_main_window()
+                if main_window and hasattr(main_window, 'solve_tab'):
+                    main_window.solve_tab.open_world_file(companion_path)
+                    print(f"[UI DEBUG] Successfully loaded companion viewer file: {companion_name}")
+                else:
+                    print("[UI DEBUG] Could not access main window or solve_tab")
+            else:
+                print(f"[UI DEBUG] Companion file not found in any search location: {companion_name}")
+                
+        except Exception as e:
+            print(f"[UI DEBUG] Error auto-loading companion viewer file: {e}")
+
+    def _get_main_window(self):
+        """Find the main window by traversing up the widget hierarchy."""
+        widget = self
+        while widget:
+            if hasattr(widget, 'solve_tab'):  # MainWindow has solve_tab attribute
+                return widget
+            widget = widget.parent()
+        return None

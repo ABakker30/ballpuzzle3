@@ -49,6 +49,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_TITLE)
         self.resize(1400, 880)
 
+        # Clean up any leftover solver processes from previous sessions
+        self._cleanup_existing_solvers()
+
         self.proc: Optional[QProcess] = None
         self.process_running = False
         self.solver_paused = False
@@ -62,8 +65,53 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
 
+    def _cleanup_existing_solvers(self):
+        """Kill any leftover solver processes from previous UI sessions."""
+        import subprocess
+        try:
+            print("[UI DEBUG] Cleaning up existing solver processes...")
+            
+            # Find all python processes running run_solver.py
+            result = subprocess.run([
+                'wmic', 'process', 'where', 
+                'name="python.exe" and CommandLine like "%run_solver.py%"', 
+                'get', 'ProcessId,CommandLine'
+            ], capture_output=True, text=True, timeout=10)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                pids_to_kill = []
+                
+                for line in lines[1:]:  # Skip header
+                    if 'run_solver.py' in line and line.strip():
+                        # Extract PID from the line
+                        parts = line.strip().split()
+                        if parts and parts[-1].isdigit():
+                            pid = parts[-1]
+                            pids_to_kill.append(pid)
+                            print(f"[UI DEBUG] Found leftover solver process PID: {pid}")
+                
+                # Kill the processes
+                if pids_to_kill:
+                    for pid in pids_to_kill:
+                        try:
+                            subprocess.run(['taskkill', '/PID', pid, '/F'], 
+                                         capture_output=True, timeout=5)
+                            print(f"[UI DEBUG] Killed solver process PID: {pid}")
+                        except Exception as e:
+                            print(f"[UI DEBUG] Failed to kill PID {pid}: {e}")
+                    print(f"[UI DEBUG] Cleaned up {len(pids_to_kill)} leftover solver processes")
+                else:
+                    print("[UI DEBUG] No leftover solver processes found")
+            else:
+                print("[UI DEBUG] No solver processes found to clean up")
+                
+        except Exception as e:
+            print(f"[UI DEBUG] Error during solver cleanup: {e}")
+
     def _stop_solver(self):
         """Cooperative stop (runctl='stop') + process teardown."""
+        print("[UI DEBUG] Stop button clicked")
         if not (self.proc and self.process_running):
             return
         # tell the solver to stop at the next safe point
@@ -80,26 +128,20 @@ class MainWindow(QMainWindow):
         finally:
             self.process_running = False
             self.solver_paused = False
-            self.btnPause.setText("Pause")
+            self.solve_tab.btnSolver.setText("▶ Start")
             self._set_status("Stopped")
             self._update_buttons()
+            self._world_watch_timer.stop()
 
     # ---------- UI build ----------
     def _build_ui(self):
         central = QWidget(self); self.setCentralWidget(central)
         v = QVBoxLayout(central); v.setContentsMargins(8, 8, 8, 8); v.setSpacing(8)
 
-        # Top bar
+        # Top bar - just status now
         top = QHBoxLayout()
-        self.btnStart = QPushButton("Start")
-        self.btnPause = QPushButton("Pause")      # solver-only Pause/Resume
-        self.btnStop  = QPushButton("Stop")
-        self.btnRefreshTop = QPushButton("Refresh viewer")
-        self.btnOpen = QPushButton("Open .current.world.json…")
         self.lblStatus = QLabel("Status: Idle"); self.lblStatus.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        for w in (self.btnStart, self.btnPause, self.btnStop, self.btnRefreshTop, self.btnOpen):
-            top.addWidget(w)
         top.addStretch(1); top.addWidget(self.lblStatus)
 
         # Tabs
@@ -119,29 +161,50 @@ class MainWindow(QMainWindow):
 
         v.addLayout(top); v.addWidget(self.tabs, 1)
 
-        # wiring
-        self.btnRefreshTop.clicked.connect(self.solve_tab.refresh_all)  # callable slot is fine
-        self.btnOpen.clicked.connect(self._pick_world_file)
-        self.btnStart.clicked.connect(self.on_start_clicked)
-        self.btnStop.clicked.connect(self._stop_solver)
-        self.btnPause.clicked.connect(self._toggle_pause_resume)
+        # wiring - connect solve tab button to main window handler
+        self.solve_tab.btnSolver.clicked.connect(self._handle_solver_button)
 
         self._update_buttons()
 
-    def on_start_clicked(self):
-        self.solve_tab.reset_progress_ui()
-        self._start_solver()
+    def _handle_solver_button(self):
+        """Handle single solver button click - starts, pauses, or resumes solver."""
+        print("[UI DEBUG] Solver button clicked")
+        
+        if not self.process_running:
+            # Not running - start the solver
+            print("[UI DEBUG] Starting solver...")
+            self.solve_tab.reset_progress_ui()
+            self._start_solver()
+        elif self.solver_paused:
+            # Paused - resume the solver
+            print("[UI DEBUG] Resuming solver...")
+            self._write_runctl("run")
+            self.solver_paused = False
+            self._set_status("Resumed")
+            self._update_buttons()
+        else:
+            # Running - pause the solver
+            print("[UI DEBUG] Pausing solver...")
+            self._write_runctl("pause")
+            self.solver_paused = True
+            self._set_status("Paused")
+            self._update_buttons()
 
     # ---------- Start / Pause / Stop ----------
     def _start_solver(self):
+        print("[UI DEBUG] _start_solver called")
         if self.process_running:
+            print("[UI DEBUG] Process already running, returning")
             return
 
         program, argv, _ = self.solve_tab.opts.build_command()
+        print(f"[UI DEBUG] Got command: {program} {argv}")
 
         vals = self.solve_tab.opts.values()
         container = vals.get("container")
+        print(f"[UI DEBUG] Container: {container}")
         if not container:
+            print("[UI DEBUG] No container selected, showing warning")
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Missing container", "Please select a Container JSON.")
             return
@@ -150,12 +213,15 @@ class MainWindow(QMainWindow):
         prog_abs = _P(program)
         if not prog_abs.is_absolute():
             prog_abs = (repo_root() / prog_abs).resolve()
+        print(f"[UI DEBUG] Program path: {prog_abs}")
+        
         if len(argv) >= 1:
             argv[0] = str(_P(argv[0]).expanduser().resolve())   # solver/wrapper
         if len(argv) >= 2 and not argv[1].startswith("-"):
             argv[1] = str(_P(argv[1]).expanduser().resolve())   # container
 
         pretty = " ".join([win_quote(str(prog_abs))] + [win_quote(a) for a in argv])
+        print(f"[UI DEBUG] About to launch: {pretty}")
         self._set_status(f"Launching: {pretty}")
 
         # logs dir for follower
@@ -179,52 +245,32 @@ class MainWindow(QMainWindow):
         self.proc.finished.connect(self._proc_finished)
 
         try:
+            print(f"[UI DEBUG] Starting process: {prog_abs} with args {argv}")
             self.proc.start(str(prog_abs), argv)
+            print("[UI DEBUG] Process.start() called successfully")
         except Exception as e:
+            print(f"[UI DEBUG] Exception during start: {e}")
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Launch error", f"Failed to start solver:\n{e}")
             self.proc = None; return
 
+        print("[UI DEBUG] Waiting for process to start...")
         if not self.proc.waitForStarted(3000):
+            print("[UI DEBUG] Process failed to start within timeout")
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Launch error", "Solver failed to start.")
             self.proc = None; return
 
+        print("[UI DEBUG] Process started successfully, updating UI state")
         self.process_running = True
         self.solver_paused = False
-        self.btnPause.setText("Pause")
+        self.solve_tab.btnSolver.setText("⏸ Pause")
         self._set_status("Running")
         self._update_buttons()
         self._world_watch_timer.start()
+        print("[UI DEBUG] UI state updated, solver should be running")
 
-    def _stop_solver(self):
-        if not (self.proc and self.process_running):
-            return
-        self._set_status("Stopping solver...")
-        # cooperative stop for the new solver
-        self._write_runctl("stop")
-        # then normal process teardown
-        self.proc.terminate()
-        if not self.proc.waitForFinished(5000):
-            self._set_status("Force-killing solver...")
-            self.proc.kill(); self.proc.waitForFinished(2000)
-        self.process_running = False
-        self.solver_paused = False
-        self.btnPause.setText("Pause")
-        self._set_status("Stopped")
-        self._update_buttons()
-        self._world_watch_timer.stop()
 
-    def _toggle_pause_resume(self):
-        if not self.process_running:
-            return
-        want_pause = not self.solver_paused
-        ok = self._write_runctl("pause" if want_pause else "run")
-        if ok:
-            self.solver_paused = want_pause
-            self.btnPause.setText("Resume" if self.solver_paused else "Pause")
-            self._set_status("Paused puzzling" if self.solver_paused else "Resumed puzzling")
-        self._update_buttons()
 
     # ---------- Small helpers ----------
     def _set_status(self, msg: str, transient_ms: int = 0):
@@ -270,23 +316,13 @@ class MainWindow(QMainWindow):
             except Exception: pass
             return False
 
-    def _pick_world_file(self):
-        start_dir = str((repo_root() / "external" / "solver" / "results").resolve())
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Open world JSON", start_dir,
-            "World JSON (*.current.world.json *.world.json *.json);;All Files (*)",
-        )
-        if not file_path:
-            return
-        from pathlib import Path as _P
-        self.solve_tab.open_world_file(_P(file_path))
-        self._set_status("File loaded")
 
     # ---------- Process I/O ----------
     def _proc_finished(self, code: int, status):
+        print(f"[UI DEBUG] _proc_finished called: code={code}, status={status}")
         self.process_running = False
         self.solver_paused = False
-        self.btnPause.setText("Pause")
+        self.btnSolver.setText("▶ Start")
         self._set_status(f"Exited ({code})")
         self._update_buttons()
         self._world_watch_timer.stop()
@@ -318,12 +354,17 @@ class MainWindow(QMainWindow):
 
     # ---------- Button states ----------
     def _update_buttons(self):
-        self.btnStart.setEnabled(not self.process_running)
-        self.btnPause.setEnabled(self.process_running)
-        self.btnStop.setEnabled(self.process_running or self.solver_paused)
-        # Normalize Pause label when leaving running state
-        if not self.process_running and self.btnPause.text() != "Pause":
-            self.btnPause.setText("Pause")
+        print(f"[UI DEBUG] _update_buttons: process_running={self.process_running}, solver_paused={self.solver_paused}")
+        self.solve_tab.btnSolver.setEnabled(True)  # Always enabled - handles start/pause/resume
+        print(f"[UI DEBUG] Button state: Solver={self.solve_tab.btnSolver.isEnabled()}")
+        
+        # Update solver button text based on state
+        if not self.process_running:
+            self.solve_tab.btnSolver.setText("▶ Start")
+        elif self.solver_paused:
+            self.solve_tab.btnSolver.setText("▶ Resume")
+        else:
+            self.solve_tab.btnSolver.setText("⏸ Pause")
 
     def _poll_world_json(self):
         p = self._current_world_path()
