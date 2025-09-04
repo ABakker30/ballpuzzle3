@@ -490,14 +490,19 @@ function addBondsForAtoms(container, atoms, material) {
 
 // ---------- main payload entry ----------
 function drawPayload(payload) {
-  // Handle clear action
+  console.log('[viewer] drawPayload called with action:', payload?.action);
+  
+  // Handle clear action ONLY
   if (payload?.action === "clear") {
-    console.log('[viewer] Clearing viewer');
+    console.log('[viewer] CLEAR action - clearing viewer');
     clearSceneMeshes();
     resetDisplayRoot();
     renderer.render(scene, camera);
     return;
   }
+
+  // For all other payloads (updates), do NOT clear anything
+  console.log('[viewer] UPDATE action - preserving existing geometry');
 
   // Normalize schema differences
   const r = (typeof payload?.r === 'number') ? payload.r : 0.5;
@@ -508,11 +513,6 @@ function drawPayload(payload) {
   if (!bbox || !Array.isArray(bbox.min) || !Array.isArray(bbox.max)) {
     bbox = computeBbox(pieces, r);
   }
-
-  const isNewRun = payload?.run_id !== lastRunId;
-  const bboxKey = JSON.stringify(bbox);
-
-  clearSceneMeshes();
 
   // Camera fitting: only on first load, preserve user settings thereafter
   if (!__zoomLocked) {
@@ -525,14 +525,42 @@ function drawPayload(payload) {
   // a bit smoother for nicer specular highlights (tune if perf dips)
   const sphereGeom = new THREE.SphereGeometry(r, 24, 16);
 
-  resetDisplayRoot();
+  const root = ensureDisplayRoot();
 
+  // Clear all existing geometry for updates (but preserve camera/scene structure)
+  const toRemove = [];
+  root.children.forEach(child => {
+    if (child.isGroup && child.userData?.pieceKey) {
+      toRemove.push(child);
+    }
+  });
+  toRemove.forEach(child => {
+    root.remove(child);
+    // Dispose geometry/materials to prevent memory leaks
+    child.traverse(obj => {
+      if (obj.geometry) obj.geometry.dispose();
+      if (obj.material) {
+        if (Array.isArray(obj.material)) {
+          obj.material.forEach(mat => mat.dispose());
+        } else {
+          obj.material.dispose();
+        }
+      }
+    });
+  });
+  
+  // Rebuild all pieces with new geometry
   pieces.forEach((piece, pieceIndex) => {
     const centers = piece.centers || [];
     if (!centers.length) return;
     const pieceKey = piece.id ?? piece.name ?? String(pieceIndex);
-    const mat = makePieceMaterialFor(pieceKey, pieceIndex, pieces.length);   // ← distinct color per piece
-
+    
+    // Create new piece group
+    const pieceGroup = new THREE.Group();
+    pieceGroup.userData.pieceKey = pieceKey;
+    root.add(pieceGroup);
+    
+    const mat = makePieceMaterialFor(pieceKey, pieceIndex, pieces.length);
     const inst = new THREE.InstancedMesh(sphereGeom, mat, centers.length);
     inst.userData.isPieceMesh = true;
 
@@ -546,16 +574,13 @@ function drawPayload(payload) {
       inst.setMatrixAt(i, tmp.matrix);
       const atomMesh = new THREE.Mesh(sphereGeom, mat);
       atomMesh.position.set(c[0], c[1], c[2]);
-      atomMesh.userData.isAtom = true;  // Tag atoms when you create them
+      atomMesh.userData.isAtom = true;
       atomMeshes.push(atomMesh);
     }
     inst.instanceMatrix.needsUpdate = true;
-    const pieceGroup = new THREE.Group();
+    
     pieceGroup.add(inst);
     atomMeshes.forEach(mesh => pieceGroup.add(mesh));
-    clearPieceDisplay(pieceGroup);      // Call the cleaner at the start of your piece draw/update function
-    pieceGroup.userData.pieceKey = pieceKey; // Save key for later recolor
-    ensureDisplayRoot().add(pieceGroup);
     addBondsForAtoms(pieceGroup, atomMeshes, mat);
   });
 }

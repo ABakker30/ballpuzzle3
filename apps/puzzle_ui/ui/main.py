@@ -178,15 +178,6 @@ class MainWindow(QMainWindow):
         print("[UI DEBUG] Solver button clicked")
         
         if not self.process_running:
-            # Clear viewer and reset all file references before loading new companion file
-            if self and hasattr(self, 'solve_tab'):
-                self.solve_tab.clear_viewer()
-            
-            # Clear main window's world file cache
-            if self:
-                self._world_path_cache = ""
-                self._last_world_mtime = 0.0
-            
             # Not running - start the solver
             print("[UI DEBUG] Starting solver...")
             self.solve_tab.reset_progress_ui()

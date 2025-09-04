@@ -325,8 +325,9 @@ class SolveTab(QWidget):
 
     # ---------- world payload to viewer ----------
     def _send_world_to_viewer(self, data: dict):
-        """Emit the viewer payload via WebChannel."""
+        """Emit the viewer payload via WebChannel - updates only, no clearing."""
         payload = {
+            "action": "update",  # Explicitly mark as update, not clear
             "version": data.get("version"),
             "run_id": data.get("run_id"),
             "r": data.get("r"),
@@ -341,8 +342,8 @@ class SolveTab(QWidget):
 
     # ---------- world file handling ----------
     def clear_viewer(self):
-        """Clear the viewer of all geometry and all file references."""
-        print("[UI DEBUG] Clearing viewer and all file references")
+        """Clear the viewer of all geometry and all file references. Only for container changes."""
+        print("[UI DEBUG] Clearing viewer and all file references (container change)")
         payload = {
             "action": "clear",
             "timestamp": time.time()
@@ -454,7 +455,7 @@ class SolveTab(QWidget):
         self._poll_tick(force=True)
 
     def refresh_viewer(self):
-        self.web.reload()
+        # Don't reload the entire page - just refresh reveal total
         self.refresh_reveal_total()
 
     def refresh_all(self):
